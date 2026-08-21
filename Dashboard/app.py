@@ -50,6 +50,16 @@ st.markdown("""<style>
   .block-container{padding-top:2rem!important;padding-bottom:1.5rem;max-width:1440px}
   hr{border:none!important;border-top:1px solid #e8e8ed!important;margin:.4rem 0!important}
   h1,h2,h3{color:#1d1d1f!important;font-weight:500!important}
+  /* Top-level tab labels only (Flat/Spread/Arb/Volatility/Risk/Positioning/
+     Currency) — excludes any button nested inside a tab's own content
+     panel, so inner sub-tabs (Vol Percentile, Forward Curves, etc.) keep
+     the default look. */
+  button[data-baseweb="tab"]:not([data-testid="stTabsPanel"] button[data-baseweb="tab"]):nth-of-type(-n+4){
+    background:#dbeafe!important;border-radius:6px 6px 0 0!important;
+  }
+  button[data-baseweb="tab"]:not([data-testid="stTabsPanel"] button[data-baseweb="tab"]):nth-of-type(n+5){
+    background:#e5e7eb!important;border-radius:6px 6px 0 0!important;
+  }
 </style>""", unsafe_allow_html=True)
 
 _D = dict(template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
@@ -1077,127 +1087,120 @@ with tab_flat:
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_spread:
     source_link("Roll Yield")
-    s_yield, s_curve, s_rank, s_heat = st.tabs(
-        ["Yield & Curve", "Forward Curves", "Ranking & Percentile", "Roll Yield Heatmap"]
-    )
     ry = load_roll_yield()
     curve_cols = [f"c{i}" for i in range(1, 9)]
 
-    with s_yield:
-        st.markdown(lbl(f"{commodity} — Roll Yield"), unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("**1-Year Roll Yield — History**")
-            fig_ry = base_fig(height=360, yaxis_title="Roll Yield (1yr, %)")
-            for code in cfg["ry_codes"]:
-                s = ry[ry["Commodity"] == code].sort_values("Date")
-                if not s.empty:
-                    fig_ry.add_trace(go.Scatter(x=s["Date"], y=(s["Roll_Yield_1yr"]*100).round(2),
-                                                name=code, line=dict(width=1.6)))
-            fig_ry.add_hline(y=0, line_dash="dot", line_color="#aaaaaa")
-            st.plotly_chart(fig_ry, use_container_width=True)
-        with c2:
-            st.markdown("**Current Forward Curve (c1 → c8)**")
-            fig_curve = base_fig(height=360, yaxis_title="Price")
-            for code in cfg["ry_codes"]:
-                s = ry[ry["Commodity"] == code].sort_values("Date")
-                if not s.empty:
-                    last = s.iloc[-1]
-                    fig_curve.add_trace(go.Scatter(x=curve_cols, y=[last[c] for c in curve_cols],
-                                                   name=code, mode="lines+markers"))
-            st.plotly_chart(fig_curve, use_container_width=True)
+    st.markdown(lbl(f"{commodity} — Roll Yield"), unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**1-Year Roll Yield — History**")
+        fig_ry = base_fig(height=360, yaxis_title="Roll Yield (1yr, %)")
+        for code in cfg["ry_codes"]:
+            s = ry[ry["Commodity"] == code].sort_values("Date")
+            if not s.empty:
+                fig_ry.add_trace(go.Scatter(x=s["Date"], y=(s["Roll_Yield_1yr"]*100).round(2),
+                                            name=code, line=dict(width=1.6)))
+        fig_ry.add_hline(y=0, line_dash="dot", line_color="#aaaaaa")
+        st.plotly_chart(fig_ry, use_container_width=True)
+    with c2:
+        st.markdown("**Current Forward Curve (c1 → c8)**")
+        fig_curve = base_fig(height=360, yaxis_title="Price")
+        for code in cfg["ry_codes"]:
+            s = ry[ry["Commodity"] == code].sort_values("Date")
+            if not s.empty:
+                last = s.iloc[-1]
+                fig_curve.add_trace(go.Scatter(x=curve_cols, y=[last[c] for c in curve_cols],
+                                               name=code, mode="lines+markers"))
+        st.plotly_chart(fig_curve, use_container_width=True)
 
-    with s_rank:
-        st.markdown(lbl(f"{commodity} — Roll Yield Ranking & Percentile"), unsafe_allow_html=True)
-        latest_date = ry["Date"].max()
-        df_latest = ry[ry["Date"] == latest_date].set_index("Commodity")
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown(f"**Ranking · {latest_date.strftime('%d/%m/%Y')}** (all Roll Yield commodities)")
-            rank_rows = []
-            for code in ry["Commodity"].unique():
-                if code in df_latest.index:
-                    v = df_latest.loc[code, "Roll_Yield_1yr"] * 100
-                    rank_rows.append({"Commodity": code, "Roll Yield (1yr)": f"{v:+.1f}%", "_ry": v})
-            rank_df = pd.DataFrame(rank_rows).sort_values("_ry", ascending=False).reset_index(drop=True)
-            rank_df.insert(0, "Rank", rank_df.index + 1)
-            fig_rank = go.Figure(go.Table(
-                header=dict(values=["Rank", "Commodity", "Roll Yield (1yr)"],
-                           fill_color=NAVY, font=dict(color="white", size=10), align="center", height=28),
-                cells=dict(values=[rank_df["Rank"], rank_df["Commodity"], rank_df["Roll Yield (1yr)"]],
-                          fill_color=[["white" if i % 2 == 0 else "#f5f5f7" for i in range(len(rank_df))]],
-                          font=dict(color=[["black"]*len(rank_df), ["black"]*len(rank_df),
-                                          [(GREEN if r > 0 else DRED) for r in rank_df["_ry"]]], size=10),
-                          align="center", height=24),
-            ))
-            fig_rank.update_layout(height=340, margin=dict(t=0, b=0, l=0, r=0), **_D)
-            st.plotly_chart(fig_rank, use_container_width=True)
-        with c2:
-            st.markdown("**Percentile vs Full History** (all Roll Yield commodities)")
-            pct_rows = []
-            for code in ry["Commodity"].unique():
-                hist = ry[ry["Commodity"] == code]["Roll_Yield_1yr"].dropna()
-                if hist.empty or code not in df_latest.index:
-                    continue
-                cur = df_latest.loc[code, "Roll_Yield_1yr"]
-                pct = float((hist < cur).mean() * 100)
-                pct_rows.append({"Commodity": code, "Percentile": round(pct, 1)})
-            pct_df = pd.DataFrame(pct_rows).sort_values("Percentile")
-            fig_pct = go.Figure(go.Bar(x=pct_df["Percentile"], y=pct_df["Commodity"], orientation="h",
-                                       marker_color=[leg_colors.get(c.replace("RC","LRC"), GREY) for c in pct_df["Commodity"]],
-                                       text=pct_df["Percentile"].map(lambda x: f"{x:.0f}th"),
-                                       textposition="outside", textfont=dict(size=9)))
-            fig_pct.add_vline(x=50, line_dash="dot", line_color="#aaaaaa")
-            fig_pct.add_vline(x=80, line_dash="dot", line_color=AMBER)
-            fig_pct.update_layout(height=340, xaxis=dict(range=[0, 115], ticksuffix="%"),
-                                  margin=dict(t=0, b=0, l=4, r=60), **_D)
-            st.plotly_chart(fig_pct, use_container_width=True)
+    st.markdown(lbl(f"{commodity} — Forward Curves"), unsafe_allow_html=True)
+    code_pick = st.selectbox("Contract", cfg["ry_codes"], key="curve_code")
+    df_comm = ry[ry["Commodity"] == code_pick].sort_values("Date")
+    all_dates_sorted = df_comm["Date"].drop_duplicates().sort_values()
+    latest_4d = all_dates_sorted.iloc[-4:].tolist() if len(all_dates_sorted) >= 4 else all_dates_sorted.tolist()
+    weekly_idx = list(range(-1, -len(all_dates_sorted), -5))[:4]
+    latest_4w = [all_dates_sorted.iloc[i] for i in sorted(weekly_idx)]
+    day_colors = ["#1d1d1f", DRED, "#82c982", "#aaaaaa"]
 
-    with s_curve:
-        st.markdown(lbl(f"{commodity} — Forward Curves"), unsafe_allow_html=True)
-        code_pick = st.selectbox("Contract", cfg["ry_codes"], key="curve_code")
-        df_comm = ry[ry["Commodity"] == code_pick].sort_values("Date")
-        all_dates_sorted = df_comm["Date"].drop_duplicates().sort_values()
-        latest_4d = all_dates_sorted.iloc[-4:].tolist() if len(all_dates_sorted) >= 4 else all_dates_sorted.tolist()
-        weekly_idx = list(range(-1, -len(all_dates_sorted), -5))[:4]
-        latest_4w = [all_dates_sorted.iloc[i] for i in sorted(weekly_idx)]
-        day_colors = ["#1d1d1f", DRED, "#82c982", "#aaaaaa"]
+    def _curve_fig(dates, colors, title):
+        fig = go.Figure()
+        for d, col in zip(dates, colors):
+            row = df_comm[df_comm["Date"] == d]
+            if row.empty:
+                continue
+            y = [row.iloc[0][c] for c in curve_cols]
+            fig.add_trace(go.Scatter(x=curve_cols, y=y, mode="lines+markers", name=d.strftime("%d/%m/%Y"),
+                                     line=dict(color=col, width=2), marker=dict(size=5)))
+        fig.update_layout(title=dict(text=title, font=dict(size=11), x=0.5, xanchor="center"),
+                          height=340, legend=dict(font=dict(size=8)), margin=dict(t=35, b=10, l=4, r=4), **_D)
+        return fig
 
-        def _curve_fig(dates, colors, title):
-            fig = go.Figure()
-            for d, col in zip(dates, colors):
-                row = df_comm[df_comm["Date"] == d]
-                if row.empty:
-                    continue
-                y = [row.iloc[0][c] for c in curve_cols]
-                fig.add_trace(go.Scatter(x=curve_cols, y=y, mode="lines+markers", name=d.strftime("%d/%m/%Y"),
-                                         line=dict(color=col, width=2), marker=dict(size=5)))
-            fig.update_layout(title=dict(text=title, font=dict(size=11), x=0.5, xanchor="center"),
-                              height=340, legend=dict(font=dict(size=8)), margin=dict(t=35, b=10, l=4, r=4), **_D)
-            return fig
+    fc1, fc2, fc3 = st.columns(3)
+    with fc1:
+        latest_row = df_comm[df_comm["Date"] == all_dates_sorted.iloc[-1]]
+        y_latest = [latest_row.iloc[0][c] for c in curve_cols]
+        fig_latest = go.Figure(go.Scatter(x=curve_cols, y=y_latest, mode="lines+markers",
+                                          line=dict(color=leg_colors.get(code_pick.replace("RC","LRC"), NAVY), width=2.5)))
+        fig_latest.update_layout(title=dict(text=f"Latest · {all_dates_sorted.iloc[-1].strftime('%d/%m/%Y')}",
+                                            font=dict(size=11), x=0.5, xanchor="center"),
+                                 height=340, margin=dict(t=35, b=10, l=4, r=4), **_D)
+        st.plotly_chart(fig_latest, use_container_width=True)
+    with fc2:
+        st.plotly_chart(_curve_fig(latest_4d, day_colors, "Last 4 Days"), use_container_width=True)
+    with fc3:
+        st.plotly_chart(_curve_fig(latest_4w, day_colors, "Last 4 Weeks"), use_container_width=True)
 
-        fc1, fc2, fc3 = st.columns(3)
-        with fc1:
-            latest_row = df_comm[df_comm["Date"] == all_dates_sorted.iloc[-1]]
-            y_latest = [latest_row.iloc[0][c] for c in curve_cols]
-            fig_latest = go.Figure(go.Scatter(x=curve_cols, y=y_latest, mode="lines+markers",
-                                              line=dict(color=leg_colors.get(code_pick.replace("RC","LRC"), NAVY), width=2.5)))
-            fig_latest.update_layout(title=dict(text=f"Latest · {all_dates_sorted.iloc[-1].strftime('%d/%m/%Y')}",
-                                                font=dict(size=11), x=0.5, xanchor="center"),
-                                     height=340, margin=dict(t=35, b=10, l=4, r=4), **_D)
-            st.plotly_chart(fig_latest, use_container_width=True)
-        with fc2:
-            st.plotly_chart(_curve_fig(latest_4d, day_colors, "Last 4 Days"), use_container_width=True)
-        with fc3:
-            st.plotly_chart(_curve_fig(latest_4w, day_colors, "Last 4 Weeks"), use_container_width=True)
+    st.markdown(lbl(f"{commodity} — Roll Yield Ranking & Percentile"), unsafe_allow_html=True)
+    latest_date = ry["Date"].max()
+    df_latest = ry[ry["Date"] == latest_date].set_index("Commodity")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"**Ranking · {latest_date.strftime('%d/%m/%Y')}** (all Roll Yield commodities)")
+        rank_rows = []
+        for code in ry["Commodity"].unique():
+            if code in df_latest.index:
+                v = df_latest.loc[code, "Roll_Yield_1yr"] * 100
+                rank_rows.append({"Commodity": code, "Roll Yield (1yr)": f"{v:+.1f}%", "_ry": v})
+        rank_df = pd.DataFrame(rank_rows).sort_values("_ry", ascending=False).reset_index(drop=True)
+        rank_df.insert(0, "Rank", rank_df.index + 1)
+        fig_rank = go.Figure(go.Table(
+            header=dict(values=["Rank", "Commodity", "Roll Yield (1yr)"],
+                       fill_color=NAVY, font=dict(color="white", size=10), align="center", height=28),
+            cells=dict(values=[rank_df["Rank"], rank_df["Commodity"], rank_df["Roll Yield (1yr)"]],
+                      fill_color=[["white" if i % 2 == 0 else "#f5f5f7" for i in range(len(rank_df))]],
+                      font=dict(color=[["black"]*len(rank_df), ["black"]*len(rank_df),
+                                      [(GREEN if r > 0 else DRED) for r in rank_df["_ry"]]], size=10),
+                      align="center", height=24),
+        ))
+        fig_rank.update_layout(height=340, margin=dict(t=0, b=0, l=0, r=0), **_D)
+        st.plotly_chart(fig_rank, use_container_width=True)
+    with c2:
+        st.markdown("**Percentile vs Full History** (all Roll Yield commodities)")
+        pct_rows = []
+        for code in ry["Commodity"].unique():
+            hist = ry[ry["Commodity"] == code]["Roll_Yield_1yr"].dropna()
+            if hist.empty or code not in df_latest.index:
+                continue
+            cur = df_latest.loc[code, "Roll_Yield_1yr"]
+            pct = float((hist < cur).mean() * 100)
+            pct_rows.append({"Commodity": code, "Percentile": round(pct, 1)})
+        pct_df = pd.DataFrame(pct_rows).sort_values("Percentile")
+        fig_pct = go.Figure(go.Bar(x=pct_df["Percentile"], y=pct_df["Commodity"], orientation="h",
+                                   marker_color=[leg_colors.get(c.replace("RC","LRC"), GREY) for c in pct_df["Commodity"]],
+                                   text=pct_df["Percentile"].map(lambda x: f"{x:.0f}th"),
+                                   textposition="outside", textfont=dict(size=9)))
+        fig_pct.add_vline(x=50, line_dash="dot", line_color="#aaaaaa")
+        fig_pct.add_vline(x=80, line_dash="dot", line_color=AMBER)
+        fig_pct.update_layout(height=340, xaxis=dict(range=[0, 115], ticksuffix="%"),
+                              margin=dict(t=0, b=0, l=4, r=60), **_D)
+        st.plotly_chart(fig_pct, use_container_width=True)
 
-    with s_heat:
-        st.markdown(lbl(f"{commodity} — Roll Yield Heatmap (Monthly Avg)"), unsafe_allow_html=True)
-        code_pick_hm = st.selectbox("Contract", cfg["ry_codes"], key="ry_heat_code")
-        s = ry[ry["Commodity"] == code_pick_hm]
-        year_month_heatmap(s, "Date", "Roll_Yield_1yr", "Avg Roll Yield", pct=True, zmid=0,
-                           colorscale=[[0.0,"#8b0000"],[0.4,"#f5c6cb"],[0.5,"#ffffff"],[0.6,"#d4edda"],[1.0,"#1a6b1a"]],
-                           key="ry_heatmap")
+    st.markdown(lbl(f"{commodity} — Roll Yield Heatmap (Monthly Avg)"), unsafe_allow_html=True)
+    code_pick_hm = st.selectbox("Contract", cfg["ry_codes"], key="ry_heat_code")
+    s = ry[ry["Commodity"] == code_pick_hm]
+    year_month_heatmap(s, "Date", "Roll_Yield_1yr", "Avg Roll Yield", pct=True, zmid=0,
+                       colorscale=[[0.0,"#8b0000"],[0.4,"#f5c6cb"],[0.5,"#ffffff"],[0.6,"#d4edda"],[1.0,"#1a6b1a"]],
+                       key="ry_heatmap")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ARB — full verified port of the Arb dashboard's KC/RC spread section
