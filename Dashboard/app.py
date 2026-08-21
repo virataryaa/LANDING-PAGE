@@ -796,10 +796,9 @@ tab_flat, tab_spread, tab_arb, tab_vol, tab_risk, tab_pos, tab_ccy = st.tabs(
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_flat:
     source_link("Rollex", "Futures OI")
-    f_grid, f_price, f_pv, f_idx, f_dist, f_vol, f_flow, f_seas, f_corr = st.tabs(
-        ["Comprehensive Grid", "Price & OI", "Price & Vol", "Indexed Performance",
-         "Return Distribution", "Rolling Volume", "OI & Volume Flow", "Seasonality",
-         "Correlation Matrix"]
+    f_idx, f_pv, f_vol, f_flow, f_seas, f_corr, f_dist, f_grid = st.tabs(
+        ["Indexed Performance", "Price & Vol", "Rolling Volume", "OI & Volume Flow",
+         "Seasonality", "Correlation Matrix", "Return Distribution", "Comprehensive Grid"]
     )
 
     with f_grid:
@@ -812,24 +811,6 @@ with tab_flat:
                 st.info("No data in this window.")
             else:
                 st.markdown(html, unsafe_allow_html=True)
-
-    with f_price:
-        st.markdown(lbl(f"{commodity} — Continuous Price & Open Interest"), unsafe_allow_html=True)
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.65, 0.35],
-                             vertical_spacing=0.05)
-        for leg in legs:
-            rx = load_rollex(cfg["rollex_codes"][leg])
-            fig.add_trace(go.Scatter(x=rx["Date"], y=rx["Close"], name=f"{leg} ({cfg['legs'][leg]})",
-                                      line=dict(color=leg_colors[leg], width=1.6)), row=1, col=1)
-            oi = load_futures_oi(cfg["futures_codes"][leg])
-            fig.add_trace(go.Bar(x=oi["Date"], y=oi["open_interest"], name=f"{leg} Total OI",
-                                  marker_color=leg_colors[leg], opacity=0.5), row=2, col=1)
-        fig.update_layout(height=520, barmode="overlay",
-                           legend=dict(orientation="h", y=1.05, font=dict(size=9)),
-                           margin=dict(t=10, b=10, l=4, r=4), **_D)
-        fig.update_yaxes(title_text="Rollex Price", row=1, col=1, gridcolor="#f0f0f0")
-        fig.update_yaxes(title_text="Total OI", row=2, col=1, gridcolor="#f0f0f0")
-        st.plotly_chart(fig, use_container_width=True)
 
     with f_pv:
         st.markdown(lbl(f"{commodity} — Rollex Price & Rolling Volatility"), unsafe_allow_html=True)
@@ -1096,8 +1077,8 @@ with tab_flat:
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_spread:
     source_link("Roll Yield")
-    s_yield, s_rank, s_curve, s_heat = st.tabs(
-        ["Yield & Curve", "Ranking & Percentile", "Forward Curves", "Roll Yield Heatmap"]
+    s_yield, s_curve, s_rank, s_heat = st.tabs(
+        ["Yield & Curve", "Forward Curves", "Ranking & Percentile", "Roll Yield Heatmap"]
     )
     ry = load_roll_yield()
     curve_cols = [f"c{i}" for i in range(1, 9)]
@@ -1309,8 +1290,8 @@ with tab_arb:
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_vol:
     source_link("Options", "Rollex")
-    v_ivrv, v_bfy, v_rvseas = st.tabs(
-        ["IV vs RV (Simplified)", "OI Change + Volume Butterfly", "RV Seasonality"]
+    v_ivrv, v_rvseas, v_bfy = st.tabs(
+        ["IV vs RV (Simplified)", "RV Seasonality", "OI Change + Volume Butterfly"]
     )
 
     with v_ivrv:
