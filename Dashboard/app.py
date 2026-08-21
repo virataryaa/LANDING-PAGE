@@ -51,22 +51,20 @@ st.markdown("""<style>
   hr{border:none!important;border-top:1px solid #e8e8ed!important;margin:.4rem 0!important}
   h1,h2,h3{color:#1d1d1f!important;font-weight:500!important}
   /* Top-level tab labels only (Flat/Spread/Arb/Volatility/Risk/Positioning/
-     Currency). Scoped with strict child combinators (>) to the container
-     the top-level st.tabs() call is wrapped in, so it can never match any
-     tab nested inside a panel's own content — no reliance on excluding
-     descendants, which doesn't hold up across nesting depths. */
-  .st-key-top_nav > div[data-testid="stTabs"] > div[data-baseweb="tab-list"]{
-    gap:8px!important;
-  }
-  .st-key-top_nav > div[data-testid="stTabs"] > div[data-baseweb="tab-list"] > button[data-baseweb="tab"]{
+     Currency). Rule 1 colors every tab-list's first 4 blue / rest gray
+     (this necessarily also hits nested sub-tabs, since nth-of-type resets
+     per parent). Rule 2 runs after it and resets anything living inside
+     role="tabpanel" — the ARIA role BaseWeb's Tabs component is required
+     to set on every tab's content panel — back to plain, which undoes
+     rule 1 everywhere except the true top-level bar (its buttons aren't
+     inside any tabpanel; they're what a tabpanel's siblings look like). */
+  div[data-baseweb="tab-list"]{ gap:8px!important; }
+  button[data-baseweb="tab"]{
     padding:8px 18px!important;margin:0 2px 6px!important;border-radius:8px!important;
   }
-  .st-key-top_nav > div[data-testid="stTabs"] > div[data-baseweb="tab-list"] > button[data-baseweb="tab"]:nth-of-type(-n+4){
-    background:#dbeafe!important;
-  }
-  .st-key-top_nav > div[data-testid="stTabs"] > div[data-baseweb="tab-list"] > button[data-baseweb="tab"]:nth-of-type(n+5){
-    background:#e5e7eb!important;
-  }
+  button[data-baseweb="tab"]:nth-of-type(-n+4){ background:#dbeafe!important; }
+  button[data-baseweb="tab"]:nth-of-type(n+5){ background:#e5e7eb!important; }
+  [role="tabpanel"] button[data-baseweb="tab"]{ background:transparent!important; }
 </style>""", unsafe_allow_html=True)
 
 _D = dict(template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
