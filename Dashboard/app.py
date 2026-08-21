@@ -69,6 +69,59 @@ def base_fig(height=380, yaxis_title=None):
                        margin=dict(t=10, b=10, l=4, r=4), **_D)
     return fig
 
+def _oi_heatmap_style(v, vmin, vmax):
+    """White -> light green, same palette as the Futures project's Comprehensive Grid."""
+    if pd.isna(v) or pd.isna(vmin) or pd.isna(vmax) or vmax <= vmin:
+        return ""
+    t = max(0.0, min(1.0, (v - vmin) / (vmax - vmin)))
+    r = int(255 - t * (255 - 150)); g = 255; b = int(255 - t * (255 - 165))
+    return f"background:rgb({r},{g},{b});"
+
+def _bar_style(v, vmax, color):
+    """Left-anchored in-cell bar, same technique as the Futures project's Volume column."""
+    if pd.isna(v) or pd.isna(vmax) or vmax <= 0:
+        return ""
+    pct = max(0.0, min(1.0, v / vmax)) * 100
+    return f"background:linear-gradient(to right, {color} {pct}%, transparent {pct}%);"
+
+def strike_table_html(merged: pd.DataFrame) -> str:
+    """Strike-ladder table: green heatmap on OI columns, light-blue bars on Volume
+    columns — same visual language as the Futures project's Comprehensive Grid."""
+    css = """
+    <style>
+    .strk-wrap { overflow:auto; max-height:460px; border:1px solid #e5e7eb; border-radius:6px; }
+    .strk-tbl { border-collapse:collapse; font-size:11px; font-family:'Inter',sans-serif; white-space:nowrap; width:100%; }
+    .strk-tbl th, .strk-tbl td { padding:3px 8px; text-align:center; border-bottom:1px solid #f0f0f0; }
+    .strk-tbl th { position:sticky; top:0; background:#fafafa; font-weight:600; z-index:2; }
+    .strk-tbl .strike-cell { position:sticky; left:0; background:#fff; font-weight:600; z-index:1; }
+    </style>
+    """
+    oi_cols  = [c for c in ["Call OI", "Put OI"] if merged[c].notna().any()]
+    vol_cols = [c for c in ["Call Vol", "Put Vol"] if merged[c].notna().any()]
+    oi_min  = {c: merged[c].min() for c in oi_cols}
+    oi_max  = {c: merged[c].max() for c in oi_cols}
+    vol_max = {c: merged[c].max() for c in vol_cols}
+
+    cols = [c for c in ["Call OI", "Call Vol", "Put OI", "Put Vol"] if c in merged.columns]
+    header = "<tr><th class='strike-cell'>Strike</th>" + "".join(f"<th>{c}</th>" for c in cols) + "</tr>"
+    rows = []
+    for strike, row in merged.iterrows():
+        cells = f"<tr><td class='strike-cell'>{strike:,.0f}</td>"
+        for c in cols:
+            v = row[c]
+            txt = f"{v:,.0f}" if pd.notna(v) else ""
+            if c in oi_cols:
+                style = _oi_heatmap_style(v, oi_min[c], oi_max[c])
+            elif c in vol_cols:
+                style = _bar_style(v, vol_max[c], "rgba(56,189,248,0.55)")
+            else:
+                style = ""
+            cells += f"<td style='{style}'>{txt}</td>"
+        cells += "</tr>"
+        rows.append(cells)
+    return (css + f"<div class='strk-wrap'><table class='strk-tbl'><thead>{header}</thead>"
+            f"<tbody>{''.join(rows)}</tbody></table></div>")
+
 def year_month_heatmap(df: pd.DataFrame, date_col: str, value_col: str, title: str, colorscale=None, key=None):
     """Shared Year x Month average-value heatmap, same shape as the VaR project's."""
     d = df.dropna(subset=[value_col]).copy()
@@ -580,15 +633,7 @@ with tab_vol:
                 merged = calls.join(puts, how="outer").sort_index()
                 merged = merged[(merged.index >= mid_strike * 0.8) & (merged.index <= mid_strike * 1.2)]
                 merged.index.name = "Strike"
-                oi_cols  = [c for c in ["Call OI", "Put OI"] if merged[c].notna().any()]
-                vol_cols = [c for c in ["Call Vol", "Put Vol"] if merged[c].notna().any()]
-                styled = merged.style
-                if oi_cols:
-                    styled = styled.background_gradient(cmap="Greens", subset=oi_cols)
-                if vol_cols:
-                    styled = styled.background_gradient(cmap="Blues", subset=vol_cols)
-                styled = styled.format("{:,.0f}", na_rep="")
-                st.dataframe(styled, use_container_width=True, height=460)
+                st.markdown(strike_table_html(merged), unsafe_allow_html=True)
             else:
                 st.info("No expiry data available.")
         except FileNotFoundError:
