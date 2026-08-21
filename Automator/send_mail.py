@@ -8,22 +8,22 @@ MSG    = sys.argv[2] if len(sys.argv) > 2 else ""
 NOW    = datetime.datetime.now().strftime("%d %b %Y  %H:%M")
 
 if STATUS == "SUCCESS":
-    subject = f"Landing Page — Source Check OK — {NOW}"
+    subject = f"Landing Page Update — {NOW}"
     body    = (
-        f"Landing Page source freshness check passed.\n\n"
+        f"Landing Page database sync completed successfully.\n\n"
         f"Time:    {NOW}\n"
+        f"Status:  Parquets synced & pushed to GitHub\n"
         f"Detail:  {MSG}\n\n"
-        f"No action needed — this project holds no data of its own, it just "
-        f"reads the other Interim_Migration projects' databases live."
+        f"Streamlit dashboard will auto-redeploy shortly."
     )
 else:
-    subject = f"Landing Page — Source Check FAILED — {NOW}"
+    subject = f"Landing Page FAILED — {NOW}"
     body    = (
-        f"Landing Page source freshness check found a problem.\n\n"
+        f"Landing Page database sync encountered an error.\n\n"
         f"Time:    {NOW}\n"
         f"Status:  FAILED\n"
         f"Detail:  {MSG}\n\n"
-        f"Check Automator\\run_log.txt for the missing/stale file list."
+        f"Check Automator\\run_log.txt for full output."
     )
 
 outlook = win32com.client.Dispatch("Outlook.Application")

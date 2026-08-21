@@ -2,11 +2,14 @@
 Landing Page — Unified Commodity Dashboard
 Commodity -> Exposure (Flat | Spread | Arb | Volatility | Risk) view.
 
-This project owns no data of its own. Every panel reads directly, read-only,
-from the Database/ folder of the sibling Interim_Migration project that
-already computes it (Rollex, Futures, Arb, Roll Yield, Options). Each of
-those projects keeps its own Database current via its own daily automator —
-this app just re-reads the latest parquet on every cache refresh.
+This project computes nothing of its own — every panel is built from parquets
+already produced by the Rollex, Futures, Arb, Roll Yield, and Options
+projects. Because this app deploys to Streamlit Cloud from its OWN git repo
+(the Cloud build has no access to the other projects' repos/Database
+folders), `Code/ingest.py` copies the specific files this app needs into
+this project's own `Database/` — same pattern the VaR project uses for the
+same reason. Run ingest.py (or the Automator) after those source projects'
+own daily updates, then push, to refresh this dashboard.
 
 Pilot scope: Coffee (KC + LRC) only. Adding a commodity is adding one entry
 to COMMODITIES plus its per-exposure source codes — no new plumbing needed.
@@ -21,13 +24,9 @@ from pathlib import Path
 
 st.set_page_config(page_title="Landing Page", layout="wide", initial_sidebar_state="collapsed")
 
-# ── Source databases (sibling projects, read-only) ─────────────────────────────
-BASE        = Path(__file__).resolve().parents[2]          # .../Interim_Migration
-ROLLEX_DB   = BASE / "Rollex" / "Database"
-FUTURES_DB  = BASE / "Futures" / "Database"
-ARB_DB      = BASE / "Arb" / "Database"
-RY_DB       = BASE / "Roll Yield" / "Database"
-OPTIONS_DB  = BASE / "Options" / "Database"
+# ── Local database (synced in by Code/ingest.py — see its docstring for why
+#    this project keeps its own copy instead of reading sibling repos directly) ─
+DB = Path(__file__).resolve().parents[1] / "Database"
 
 KC_FACTOR = 22.0462           # ¢/lb -> $/MT, same conversion the Arb project uses
 CONF_Z    = 2.3263            # one-tailed 99% VaR z-score, same as the VaR project
@@ -66,14 +65,14 @@ COMMODITIES = {
 # ── Loaders — thin, cached, read-only ──────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def load_rollex(code: str) -> pd.DataFrame:
-    df = pd.read_parquet(ROLLEX_DB / f"rollex_{code}.parquet")[["rollex_px"]].reset_index()
+    df = pd.read_parquet(DB / f"rollex_{code}.parquet")[["rollex_px"]].reset_index()
     df.columns = ["Date", "Close"]
     df["Date"] = pd.to_datetime(df["Date"])
     return df.sort_values("Date").dropna()
 
 @st.cache_data(ttl=1800)
 def load_futures_oi(code_lower: str) -> pd.DataFrame:
-    df = pd.read_parquet(FUTURES_DB / f"{code_lower}_futures.parquet", columns=["Date", "open_interest"])
+    df = pd.read_parquet(DB / f"{code_lower}_futures.parquet", columns=["Date", "open_interest"])
     df["Date"] = pd.to_datetime(df["Date"])
     tot = df.groupby("Date")["open_interest"].sum(min_count=1).reset_index()
     return tot.sort_values("Date")
@@ -81,7 +80,7 @@ def load_futures_oi(code_lower: str) -> pd.DataFrame:
 @st.cache_data(ttl=1800)
 def load_front_price(code_lower: str) -> pd.DataFrame:
     """Active front-contract settlement — same method as the VaR project."""
-    raw = pd.read_parquet(FUTURES_DB / f"{code_lower}_futures.parquet",
+    raw = pd.read_parquet(DB / f"{code_lower}_futures.parquet",
                            columns=["Date", "FND", "settlement", "ice_symbol"])
     raw["Date"] = pd.to_datetime(raw["Date"])
     raw["FND"]  = pd.to_datetime(raw["FND"])
@@ -94,17 +93,17 @@ def load_front_price(code_lower: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=1800)
 def load_arb_front(code: str) -> pd.DataFrame:
-    return pd.read_parquet(ARB_DB / f"front_{code}.parquet")
+    return pd.read_parquet(DB / f"front_{code}.parquet")
 
 @st.cache_data(ttl=1800)
 def load_roll_yield() -> pd.DataFrame:
-    df = pd.read_parquet(RY_DB / "roll_yield_data.parquet")
+    df = pd.read_parquet(DB / "roll_yield_data.parquet")
     df["Date"] = pd.to_datetime(df["Date"])
     return df
 
 @st.cache_data(ttl=1800)
 def load_options(code: str) -> pd.DataFrame:
-    df = pd.read_parquet(OPTIONS_DB / f"{code}_options_ice.parquet")
+    df = pd.read_parquet(DB / f"{code}_options_ice.parquet")
     df["date"] = pd.to_datetime(df["date"])
     return df
 
