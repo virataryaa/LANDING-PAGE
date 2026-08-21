@@ -51,19 +51,20 @@ st.markdown("""<style>
   hr{border:none!important;border-top:1px solid #e8e8ed!important;margin:.4rem 0!important}
   h1,h2,h3{color:#1d1d1f!important;font-weight:500!important}
   /* Top-level tab labels only (Flat/Spread/Arb/Volatility/Risk/Positioning/
-     Currency) — excludes any button nested inside a tab's own content
-     panel, so inner sub-tabs (Vol Percentile, Forward Curves, etc.) keep
-     the default look. */
-  div[data-testid="stTabs"]:not([data-testid="stTabsPanel"] div[data-testid="stTabs"]) > div[data-baseweb="tab-list"]{
+     Currency). Scoped with strict child combinators (>) to the container
+     the top-level st.tabs() call is wrapped in, so it can never match any
+     tab nested inside a panel's own content — no reliance on excluding
+     descendants, which doesn't hold up across nesting depths. */
+  .st-key-top_nav > div[data-testid="stTabs"] > div[data-baseweb="tab-list"]{
     gap:8px!important;
   }
-  button[data-baseweb="tab"]:not([data-testid="stTabsPanel"] button[data-baseweb="tab"]){
+  .st-key-top_nav > div[data-testid="stTabs"] > div[data-baseweb="tab-list"] > button[data-baseweb="tab"]{
     padding:8px 18px!important;margin:0 2px 6px!important;border-radius:8px!important;
   }
-  button[data-baseweb="tab"]:not([data-testid="stTabsPanel"] button[data-baseweb="tab"]):nth-of-type(-n+4){
+  .st-key-top_nav > div[data-testid="stTabs"] > div[data-baseweb="tab-list"] > button[data-baseweb="tab"]:nth-of-type(-n+4){
     background:#dbeafe!important;
   }
-  button[data-baseweb="tab"]:not([data-testid="stTabsPanel"] button[data-baseweb="tab"]):nth-of-type(n+5){
+  .st-key-top_nav > div[data-testid="stTabs"] > div[data-baseweb="tab-list"] > button[data-baseweb="tab"]:nth-of-type(n+5){
     background:#e5e7eb!important;
   }
 </style>""", unsafe_allow_html=True)
@@ -543,11 +544,22 @@ DISAGG_SPEC = {
     "MM + Non-Rep":         {"long":"MM+NonRep Long",      "short":"MM+NonRep Short",      "net":"MM+NonRep Net"},
     "Commercial (Producer)": {"long":"Producer Long", "short":"Producer Short", "net":"Comm Net"},
 }
+CIT_SPEC = {
+    "Large Spec":    {"long":"Spec Long",    "short":"Spec Short",    "net":"Spec Net"},
+    "Non-Rep":       {"long":"Non Rep Long", "short":"Non Rep Short", "net":"Non Rep Net"},
+    "Index Traders": {"long":"Index Long",   "short":"Index Short",   "net":"Index Net"},
+    "Large + Small": {"long":"Spec+NonRep Long", "short":"Spec+NonRep Short", "net":"Spec+NonRep Net"},
+    "Large Spec + Index + Non-Rep": {"long":"Combined Spec Long","short":"Combined Spec Short","net":"Combined Spec Net"},
+    "Commercial":    {"long":"Comm Long",    "short":"Comm Short",    "net":"Comm Net"},
+}
+CIT_COMMS = {"KC", "CC", "SB", "CT"}   # commodities the CIT report covers; RC/LCC/LSU are Disagg-only
 COT_LOOKBACKS = [1, 3, 5, 10]
 
 def _cot_derive_nets(df):
     pairs = [("MM Long","MM Short","MM Net"), ("Swap Long","Swap Short","Swap Net"),
-             ("Other Long","Other Short","Other Net"), ("Producer Long","Producer Short","Comm Net")]
+             ("Other Long","Other Short","Other Net"), ("Producer Long","Producer Short","Comm Net"),
+             ("Spec Long","Spec Short","Spec Net"), ("Index Long","Index Short","Index Net"),
+             ("Non Rep Long","Non Rep Short","Non Rep Net"), ("Comm Long","Comm Short","Comm Net")]
     for l, s, n in pairs:
         if l in df.columns and s in df.columns and n not in df.columns:
             df[n] = df[l] - df[s]
@@ -579,6 +591,22 @@ def load_cot_disagg() -> pd.DataFrame:
     df["MM+NonRep Net"] = df["MM+NonRep Long"] - df["MM+NonRep Short"]
     df = _cot_add_pct(df)
     return df.sort_values(["Commodity", "Crop", "Date"]).reset_index(drop=True)
+
+@st.cache_data(ttl=1800)
+def load_cot_cit() -> pd.DataFrame:
+    df = pd.read_parquet(DB / "cot_cit.parquet")
+    df["Date"] = pd.to_datetime(df["Date"])
+    num = [c for c in df.columns if c not in ("Date", "Commodity", "Crop")]
+    df[num] = df[num].astype(float)
+    df = _cot_derive_nets(df)
+    for side in ("Long", "Short"):
+        df[f"Combined Spec {side}"] = df.get(f"Spec {side}", 0) + df.get(f"Non Rep {side}", 0) + df.get(f"Index {side}", 0)
+    df["Combined Spec Net"] = df["Combined Spec Long"] - df["Combined Spec Short"]
+    for side in ("Long", "Short"):
+        df[f"Spec+NonRep {side}"] = df.get(f"Spec {side}", 0) + df.get(f"Non Rep {side}", 0)
+    df["Spec+NonRep Net"] = df["Spec+NonRep Long"] - df["Spec+NonRep Short"]
+    df = _cot_add_pct(df)
+    return df.sort_values(["Commodity", "Date"]).reset_index(drop=True)
 
 def _cot_zscore(series: pd.Series, years: int) -> float:
     if series.empty:
@@ -698,30 +726,48 @@ def _recap_html(df, signed=False, change_table=False, scroll=False, signed_group
     return (f'{_RECAP_CSS}<div style="{scroll_style}margin-bottom:6px">'
             f'<table class="rtbl"><thead>{h1}{h2}</thead><tbody>{body}</tbody></table></div>')
 
-def _build_recap_df(d):
-    """Disagg-only version of cot_app.py's _build_recap_df."""
+def _build_recap_df(d, report="Disagg"):
+    """report='Disagg' or 'CIT' — mirrors cot_app.py's _build_recap_df branches."""
     d = d.sort_values("Date", ascending=True).reset_index(drop=True)
     if d.empty:
         return pd.DataFrame(), pd.DataFrame()
     def gc(name):
         return d[name].astype(float) if name in d.columns else pd.Series(0.0, index=d.index)
     cols = {}
-    for src, dst in [("MM Long","MM Long"),("MM Short","MM Short"),("Other Long","Other Long"),
-                     ("Other Short","Other Short"),("Non Rep Long","Non-Rep Long"),
-                     ("Non Rep Short","Non-Rep Short"),("Swap Long","Swap Long"),
-                     ("Swap Short","Swap Short"),("Producer Long","Comm Long"),
-                     ("Producer Short","Comm Short")]:
-        if src in d.columns: cols[("Gross Positions", dst)] = gc(src) / 1000
-    cols[("MM+O+NR", "Long")]  = (gc("MM Long")  + gc("Other Long")  + gc("Non Rep Long"))  / 1000
-    cols[("MM+O+NR", "Short")] = (gc("MM Short") + gc("Other Short") + gc("Non Rep Short")) / 1000
-    cols[("NET", "MM")]      = gc("MM Net")   / 1000
-    cols[("NET", "Rest")]    = (gc("Other Net") + gc("Non Rep Net")) / 1000
-    cols[("NET", "MM+O+NR")] = (gc("MM Net") + gc("Other Net") + gc("Non Rep Net")) / 1000
-    cols[("NET", "Swap")]    = gc("Swap Net")  / 1000
-    cols[("NET", "Comm")]    = gc("Comm Net")  / 1000
-    for src, dst in [("MM Spread","MM Spread"),("Other Spread","Other Spread"),("Swap Spread","Swap Spread")]:
-        if src in d.columns: cols[("SP", dst)] = gc(src) / 1000
-    cols[("OI", "Total OI")] = gc("Total OI") / 1000
+    if report == "CIT":
+        for src, dst in [("Spec Long","Large Long"),("Spec Short","Large Short"),
+                         ("Non Rep Long","Small Long"),("Non Rep Short","Small Short")]:
+            if src in d.columns: cols[("Gross Positions", dst)] = gc(src) / 1000
+        cols[("Gross Positions", "L+S Long")]  = (gc("Spec Long") + gc("Non Rep Long"))  / 1000
+        cols[("Gross Positions", "L+S Short")] = (gc("Spec Short")+ gc("Non Rep Short")) / 1000
+        for src, dst in [("Index Long","Index Long"),("Index Short","Index Short")]:
+            if src in d.columns: cols[("Gross Positions", dst)] = gc(src) / 1000
+        for src, dst in [("Comm Long","Comm Long"),("Comm Short","Comm Short")]:
+            if src in d.columns: cols[("Gross Positions", dst)] = gc(src) / 1000
+        cols[("NET", "Large")]       = gc("Spec Net")   / 1000
+        cols[("NET", "Small")]       = gc("Non Rep Net") / 1000
+        cols[("NET", "Index")]       = gc("Index Net")   / 1000
+        cols[("NET", "Comm")]        = gc("Comm Net")    / 1000
+        cols[("NET", "Large+Small")] = (gc("Spec Net") + gc("Non Rep Net")) / 1000
+        if "Spec Spread" in d.columns: cols[("SP", "Spec Spread")] = gc("Spec Spread") / 1000
+        cols[("OI", "Total OI")] = gc("Total OI") / 1000
+    else:
+        for src, dst in [("MM Long","MM Long"),("MM Short","MM Short"),("Other Long","Other Long"),
+                         ("Other Short","Other Short"),("Non Rep Long","Non-Rep Long"),
+                         ("Non Rep Short","Non-Rep Short"),("Swap Long","Swap Long"),
+                         ("Swap Short","Swap Short"),("Producer Long","Comm Long"),
+                         ("Producer Short","Comm Short")]:
+            if src in d.columns: cols[("Gross Positions", dst)] = gc(src) / 1000
+        cols[("MM+O+NR", "Long")]  = (gc("MM Long")  + gc("Other Long")  + gc("Non Rep Long"))  / 1000
+        cols[("MM+O+NR", "Short")] = (gc("MM Short") + gc("Other Short") + gc("Non Rep Short")) / 1000
+        cols[("NET", "MM")]      = gc("MM Net")   / 1000
+        cols[("NET", "Rest")]    = (gc("Other Net") + gc("Non Rep Net")) / 1000
+        cols[("NET", "MM+O+NR")] = (gc("MM Net") + gc("Other Net") + gc("Non Rep Net")) / 1000
+        cols[("NET", "Swap")]    = gc("Swap Net")  / 1000
+        cols[("NET", "Comm")]    = gc("Comm Net")  / 1000
+        for src, dst in [("MM Spread","MM Spread"),("Other Spread","Other Spread"),("Swap Spread","Swap Spread")]:
+            if src in d.columns: cols[("SP", dst)] = gc(src) / 1000
+        cols[("OI", "Total OI")] = gc("Total OI") / 1000
     cols[("Rollex Px", "Level")] = gc("Px")
 
     body = pd.DataFrame(cols)
@@ -802,9 +848,10 @@ cfg = COMMODITIES[commodity]
 legs = list(cfg["legs"].keys())          # e.g. ["KC", "LRC"]
 leg_colors = {legs[0]: NAVY, legs[1]: "#8b1a00"} if len(legs) > 1 else {legs[0]: NAVY}
 
-tab_flat, tab_spread, tab_arb, tab_vol, tab_risk, tab_pos, tab_ccy = st.tabs(
-    ["Flat", "Spread", "Arb", "Volatility", "Risk", "Positioning", "Currency"]
-)
+with st.container(key="top_nav"):
+    tab_flat, tab_spread, tab_arb, tab_vol, tab_risk, tab_pos, tab_ccy = st.tabs(
+        ["Flat", "Spread", "Arb", "Volatility", "Risk", "Positioning", "Currency"]
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FLAT — ports of Rollex dashboard (Price&OI, Price&Vol, Indexed, Return Dist)
@@ -1510,13 +1557,24 @@ with tab_pos:
 
         with p_recap:
             st.markdown(lbl(f"{commodity} — COT Recap"), unsafe_allow_html=True)
-            leg_pick_recap0 = st.selectbox("Leg", legs, key="recap_leg0")
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                leg_pick_recap0 = st.selectbox("Leg", legs, key="recap_leg0")
             cot_code_r0 = "RC" if leg_pick_recap0 == "LRC" else leg_pick_recap0
-            d_recap = cot[(cot["Commodity"] == cot_code_r0) & (cot["Crop"] == "All")]
+            with c2:
+                if cot_code_r0 in CIT_COMMS:
+                    report_recap = st.radio("Report", ["Disagg", "CIT"], horizontal=True, key="recap_report")
+                else:
+                    report_recap = "Disagg"
+            cot_recap = load_cot_cit() if report_recap == "CIT" else cot
+            if report_recap == "CIT":
+                d_recap = cot_recap[cot_recap["Commodity"] == cot_code_r0]
+            else:
+                d_recap = cot_recap[(cot_recap["Commodity"] == cot_code_r0) & (cot_recap["Crop"] == "All")]
             if d_recap.empty:
                 st.warning("No data for the selected leg.")
             else:
-                summary, body = _build_recap_df(d_recap)
+                summary, body = _build_recap_df(d_recap, report=report_recap)
                 if body.empty:
                     st.warning("No data.")
                 else:
@@ -1575,9 +1633,20 @@ with tab_pos:
 
         with p_recap_ch:
             st.markdown(lbl(f"{commodity} — COT Recap Charts"), unsafe_allow_html=True)
-            leg_pick_rc = st.selectbox("Leg", legs, key="recap_ch_leg")
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                leg_pick_rc = st.selectbox("Leg", legs, key="recap_ch_leg")
             cot_code_rc = "RC" if leg_pick_rc == "LRC" else leg_pick_rc
-            d_rc = cot[(cot["Commodity"] == cot_code_rc) & (cot["Crop"] == "All")].sort_values("Date").reset_index(drop=True)
+            with c2:
+                if cot_code_rc in CIT_COMMS:
+                    report_rc = st.radio("Report", ["Disagg", "CIT"], horizontal=True, key="recap_ch_report")
+                else:
+                    report_rc = "Disagg"
+            cot_rc_src = load_cot_cit() if report_rc == "CIT" else cot
+            if report_rc == "CIT":
+                d_rc = cot_rc_src[cot_rc_src["Commodity"] == cot_code_rc].sort_values("Date").reset_index(drop=True)
+            else:
+                d_rc = cot_rc_src[(cot_rc_src["Commodity"] == cot_code_rc) & (cot_rc_src["Crop"] == "All")].sort_values("Date").reset_index(drop=True)
             if d_rc.empty:
                 st.warning("No data for the selected leg.")
             else:
@@ -1603,38 +1672,65 @@ with tab_pos:
                         fig.add_trace(go.Scatter(x=dates_rc, y=y, name=name, line=dict(color=clrs[i % len(clrs)], width=1.5)))
                     return fig
 
-                mm_net, swap_net = gc_rc("MM Net"), gc_rc("Swap Net")
                 rc_cols = st.columns(3)
-                panels = [
-                    ("MM Gross k lots", {"MM Long": gc_rc("MM Long")/1000, "MM Short": gc_rc("MM Short")/1000}, [C_LONG, C_SHORT]),
-                    ("MM Gross % of OI", {"MM Long %": gc_rc("MM Long")/oi_rc*100, "MM Short %": gc_rc("MM Short")/oi_rc*100}, [C_LONG, C_SHORT]),
-                    (f"MM Nominal M USD", {"MM Long": gc_rc("MM Long")*mult, "MM Short": gc_rc("MM Short")*mult}, [C_LONG, C_SHORT]),
-                    ("Commercial Gross k lots", {"Prod Long": gc_rc("Producer Long")/1000, "Prod Short": gc_rc("Producer Short")/1000}, [C_LONG, C_SHORT]),
-                    ("Commercial Gross % of OI", {"Prod Long %": gc_rc("Producer Long")/oi_rc*100, "Prod Short %": gc_rc("Producer Short")/oi_rc*100}, [C_LONG, C_SHORT]),
-                    (f"Commercial Nominal M USD", {"Prod Long": gc_rc("Producer Long")*mult, "Prod Short": gc_rc("Producer Short")*mult}, [C_LONG, C_SHORT]),
-                    ("Other Gross k lots", {"Other Long": gc_rc("Other Long")/1000, "Other Short": gc_rc("Other Short")/1000}, [C_LONG, C_SHORT]),
-                    ("Other Gross % of OI", {"Other Long %": gc_rc("Other Long")/oi_rc*100, "Other Short %": gc_rc("Other Short")/oi_rc*100}, [C_LONG, C_SHORT]),
-                    (f"Other Nominal M USD", {"Other Long": gc_rc("Other Long")*mult, "Other Short": gc_rc("Other Short")*mult}, [C_LONG, C_SHORT]),
-                    ("MM Net & Swap Net & Other Net k lots", {"MM Net": mm_net/1000, "Swap Net": swap_net/1000, "Other Net": gc_rc("Other Net")/1000}, [C_NET, C_LONG, "#f59e0b"]),
-                    ("# of Traders", {"MM Long": gc_rc("Traders MM Long"), "MM Short": gc_rc("Traders MM Short"),
-                                      "Other Long": gc_rc("Traders Other Long"), "Other Short": gc_rc("Traders Other Short")},
-                     [C_LONG, C_SHORT, "#f59e0b", "#7c3aed"]),
-                    ("Other Spread k lots", {"Other Spread": gc_rc("Other Spread")/1000}, ["#f59e0b"]),
-                ]
+                if report_rc == "CIT":
+                    spec_net, idx_net = gc_rc("Spec Net"), gc_rc("Index Net")
+                    panels = [
+                        ("Net Spec & Net Index k lots", {"Net Spec": spec_net/1000, "Net Index": idx_net/1000}, [C_NET, C_LONG]),
+                        ("Spec Gross k lots", {"Large Long": gc_rc("Spec Long")/1000, "Large Short": gc_rc("Spec Short")/1000}, [C_LONG, C_SHORT]),
+                        ("Spec Gross % of OI", {"Lrg+Sml Long %": (gc_rc("Spec Long")+gc_rc("Non Rep Long"))/oi_rc*100,
+                                                "Lrg+Sml Short %": (gc_rc("Spec Short")+gc_rc("Non Rep Short"))/oi_rc*100}, [C_LONG, C_SHORT]),
+                        ("Spec Nominal M USD", {"Spec Long": gc_rc("Spec Long")*mult, "Spec Short": gc_rc("Spec Short")*mult}, [C_LONG, C_SHORT]),
+                        ("# of Traders", {"Large Long": gc_rc("Traders Spec Long"), "Large Short": gc_rc("Traders Spec Short")}, [C_LONG, C_SHORT]),
+                        ("Commercial Gross k lots", {"Comm Long": gc_rc("Comm Long")/1000, "Comm Short": gc_rc("Comm Short")/1000}, [C_LONG, C_SHORT]),
+                        ("Commercial Gross % of OI", {"Comm Long %": gc_rc("Comm Long")/oi_rc*100, "Comm Short %": gc_rc("Comm Short")/oi_rc*100}, [C_LONG, C_SHORT]),
+                        ("Commercial Nominal M USD", {"Gross Long": gc_rc("Comm Long")*mult, "Gross Short": gc_rc("Comm Short")*mult}, [C_LONG, C_SHORT]),
+                    ]
+                else:
+                    mm_net, swap_net = gc_rc("MM Net"), gc_rc("Swap Net")
+                    panels = [
+                        ("MM Gross k lots", {"MM Long": gc_rc("MM Long")/1000, "MM Short": gc_rc("MM Short")/1000}, [C_LONG, C_SHORT]),
+                        ("MM Gross % of OI", {"MM Long %": gc_rc("MM Long")/oi_rc*100, "MM Short %": gc_rc("MM Short")/oi_rc*100}, [C_LONG, C_SHORT]),
+                        (f"MM Nominal M USD", {"MM Long": gc_rc("MM Long")*mult, "MM Short": gc_rc("MM Short")*mult}, [C_LONG, C_SHORT]),
+                        ("Commercial Gross k lots", {"Prod Long": gc_rc("Producer Long")/1000, "Prod Short": gc_rc("Producer Short")/1000}, [C_LONG, C_SHORT]),
+                        ("Commercial Gross % of OI", {"Prod Long %": gc_rc("Producer Long")/oi_rc*100, "Prod Short %": gc_rc("Producer Short")/oi_rc*100}, [C_LONG, C_SHORT]),
+                        (f"Commercial Nominal M USD", {"Prod Long": gc_rc("Producer Long")*mult, "Prod Short": gc_rc("Producer Short")*mult}, [C_LONG, C_SHORT]),
+                        ("Other Gross k lots", {"Other Long": gc_rc("Other Long")/1000, "Other Short": gc_rc("Other Short")/1000}, [C_LONG, C_SHORT]),
+                        ("Other Gross % of OI", {"Other Long %": gc_rc("Other Long")/oi_rc*100, "Other Short %": gc_rc("Other Short")/oi_rc*100}, [C_LONG, C_SHORT]),
+                        (f"Other Nominal M USD", {"Other Long": gc_rc("Other Long")*mult, "Other Short": gc_rc("Other Short")*mult}, [C_LONG, C_SHORT]),
+                        ("MM Net & Swap Net & Other Net k lots", {"MM Net": mm_net/1000, "Swap Net": swap_net/1000, "Other Net": gc_rc("Other Net")/1000}, [C_NET, C_LONG, "#f59e0b"]),
+                        ("# of Traders", {"MM Long": gc_rc("Traders MM Long"), "MM Short": gc_rc("Traders MM Short"),
+                                          "Other Long": gc_rc("Traders Other Long"), "Other Short": gc_rc("Traders Other Short")},
+                         [C_LONG, C_SHORT, "#f59e0b", "#7c3aed"]),
+                        ("Other Spread k lots", {"Other Spread": gc_rc("Other Spread")/1000}, ["#f59e0b"]),
+                    ]
                 for i, (title, series, clrs) in enumerate(panels):
                     with rc_cols[i % 3]:
                         st.plotly_chart(_rc_line(title, series, clrs), use_container_width=True, key=f"recap_ch_{i}")
 
         with p_pain:
             st.markdown(lbl(f"{commodity} — Pain Trade Monitor (first visual)"), unsafe_allow_html=True)
-            leg_pick_pt = st.selectbox("Leg", legs, key="pain_leg")
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                leg_pick_pt = st.selectbox("Leg", legs, key="pain_leg")
             cot_code_pt = "RC" if leg_pick_pt == "LRC" else leg_pick_pt
-            d_pt = cot[(cot["Commodity"] == cot_code_pt) & (cot["Crop"] == "All")].copy()
+            with c2:
+                if cot_code_pt in CIT_COMMS:
+                    report_pt = st.radio("Report", ["Disagg", "CIT"], horizontal=True, key="pain_report")
+                else:
+                    report_pt = "Disagg"
+            cot_pt_src = load_cot_cit() if report_pt == "CIT" else cot
+            if report_pt == "CIT":
+                d_pt = cot_pt_src[cot_pt_src["Commodity"] == cot_code_pt].copy()
+                spec_l, spec_s, long3, short3, third_label = "Spec Long", "Spec Short", "Index Long", "Index Short", "Index"
+            else:
+                d_pt = cot_pt_src[(cot_pt_src["Commodity"] == cot_code_pt) & (cot_pt_src["Crop"] == "All")].copy()
+                spec_l, spec_s, long3, short3, third_label = "MM Long", "MM Short", "Other Long", "Other Short", "Other Rept."
             if d_pt.empty:
                 st.warning("No data for the selected leg.")
             else:
-                incl = st.radio("Include Other Rept. in spec legs?",
-                                ["Yes — MM + Non Rep + Other Rept.", "No — MM + Non Rep only"],
+                incl = st.radio(f"Include {third_label} in spec legs?",
+                                [f"Yes — Spec/MM + Non Rep + {third_label}", "No — Spec/MM + Non Rep only"],
                                 index=0, horizontal=True, key="pain_incl")
                 use_third = incl.startswith("Yes")
 
@@ -1643,18 +1739,18 @@ with tab_pos:
                 df_pt["Rollex"] = pd.to_numeric(df_pt["Px"], errors="coerce")
                 if "Total OI" in df_pt.columns:
                     oi_cap = pd.to_numeric(df_pt["Total OI"], errors="coerce").clip(lower=1)
-                    for _pc in ["MM Long", "MM Short", "Other Long", "Other Short", "Non Rep Long", "Non Rep Short"]:
+                    for _pc in [spec_l, spec_s, long3, short3, "Non Rep Long", "Non Rep Short"]:
                         if _pc in df_pt.columns:
                             df_pt[_pc] = pd.to_numeric(df_pt[_pc], errors="coerce").clip(upper=oi_cap)
 
                 if use_third:
-                    gross_long  = (df_pt["MM Long"] + df_pt["Non Rep Long"] + df_pt["Other Long"]) / 1000
-                    gross_short = (df_pt["MM Short"] + df_pt["Non Rep Short"] + df_pt["Other Short"]) / 1000
-                    leg_label = "MM + Non Rep + Other Rept."
+                    gross_long  = (df_pt[spec_l] + df_pt["Non Rep Long"] + df_pt[long3])  / 1000
+                    gross_short = (df_pt[spec_s] + df_pt["Non Rep Short"] + df_pt[short3]) / 1000
+                    leg_label = f"Spec/MM + Non Rep + {third_label}"
                 else:
-                    gross_long  = (df_pt["MM Long"] + df_pt["Non Rep Long"]) / 1000
-                    gross_short = (df_pt["MM Short"] + df_pt["Non Rep Short"]) / 1000
-                    leg_label = "MM + Non Rep"
+                    gross_long  = (df_pt[spec_l] + df_pt["Non Rep Long"])  / 1000
+                    gross_short = (df_pt[spec_s] + df_pt["Non Rep Short"]) / 1000
+                    leg_label = "Spec/MM + Non Rep"
 
                 long_chg, short_chg = gross_long.diff(), gross_short.diff()
                 df_pt["Long Add"]    =  long_chg.clip(lower=0)
@@ -1739,11 +1835,23 @@ with tab_pos:
 
         with p_dist:
             st.markdown(lbl(f"{commodity} — COT Positioning Distribution"), unsafe_allow_html=True)
-            leg_pick = st.selectbox("Leg", legs, key="cot_dist_leg")
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                leg_pick = st.selectbox("Leg", legs, key="cot_dist_leg")
             cot_code = "RC" if leg_pick == "LRC" else leg_pick
-            d = cot[(cot["Commodity"] == cot_code) & (cot["Crop"] == "All")].sort_values("Date")
-            dist_cat = st.selectbox("Category", list(DISAGG_SPEC.keys()), key="cot_dist_cat")
-            cols_cat = DISAGG_SPEC[dist_cat]
+            with c2:
+                if cot_code in CIT_COMMS:
+                    report_dist = st.radio("Report", ["Disagg", "CIT"], horizontal=True, key="cot_dist_report")
+                else:
+                    report_dist = "Disagg"
+            spec_map = CIT_SPEC if report_dist == "CIT" else DISAGG_SPEC
+            cot_dist_src = load_cot_cit() if report_dist == "CIT" else cot
+            if report_dist == "CIT":
+                d = cot_dist_src[cot_dist_src["Commodity"] == cot_code].sort_values("Date")
+            else:
+                d = cot_dist_src[(cot_dist_src["Commodity"] == cot_code) & (cot_dist_src["Crop"] == "All")].sort_values("Date")
+            dist_cat = st.selectbox("Category", list(spec_map.keys()), key=f"cot_dist_cat_{report_dist}")
+            cols_cat = spec_map[dist_cat]
             lb_choice = st.radio("History window", ["All", "1y", "3y", "5y", "10y"],
                                  horizontal=True, key="cot_dist_lb")
             if lb_choice != "All":

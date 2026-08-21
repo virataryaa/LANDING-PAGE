@@ -41,6 +41,7 @@ SOURCES = [
     (ROOT / "Options" / "Database" / "KC_options_ice.parquet",  OUT_DIR / "KC_options_ice.parquet"),
     (ROOT / "Options" / "Database" / "LRC_options_ice.parquet", OUT_DIR / "LRC_options_ice.parquet"),
     (ROOT / "COT_ALL" / "Database" / "cot_disagg_fut.parquet",  OUT_DIR / "cot_disagg_fut.parquet"),
+    (ROOT / "COT_ALL" / "Database" / "cot_cit.parquet",         OUT_DIR / "cot_cit.parquet"),
     (ROOT / "Currency" / "Database" / "currency_data.parquet",  OUT_DIR / "currency_data.parquet"),
 ]
 
