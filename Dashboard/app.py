@@ -39,7 +39,6 @@ DB = Path(__file__).resolve().parents[1] / "Database"
 KC_FACTOR = 22.0462           # ¢/lb -> $/MT, same conversion the Arb project uses
 CONF_Z    = 2.3263            # one-tailed 99% VaR z-score, same as the VaR project
 LOT_SIZES = {"KC": 375, "LRC": 10}
-ROLLS_YR  = {"KC": 5,   "LRC": 5}   # Roll Yield project's rolls-per-year assumption
 MONTHS    = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
 # ── Style (consistent with VaR Monitor's theme) ────────────────────────────────
@@ -68,6 +67,140 @@ def base_fig(height=380, yaxis_title=None):
                        legend=dict(orientation="h", y=1.05, font=dict(size=9)),
                        margin=dict(t=10, b=10, l=4, r=4), **_D)
     return fig
+
+# ── Comprehensive Grid — verbatim port of the Futures dashboard's table ───────
+def _cg_safe(v, default=1.0):
+    v = float(v) if pd.notna(v) else default
+    return v if v > 0 else default
+
+def _cg_oi_heatmap_style(v, vmin, vmax):
+    if pd.isna(v):
+        return ""
+    vmin = float(vmin) if pd.notna(vmin) else 0.0
+    vmax = float(vmax) if pd.notna(vmax) else vmin + 1.0
+    span = vmax - vmin
+    t = min(max((float(v) - vmin) / span, 0.0), 1.0) if span > 0 else 0.0
+    r = round(255 + t * (150 - 255)); g = round(255 + t * (200 - 255)); b = round(255 + t * (165 - 255))
+    return f"background-color:rgb({r},{g},{b});color:#1a1a1a"
+
+def _cg_bar_style(v, vmax, color):
+    if pd.isna(v) or v == 0:
+        return ""
+    pct = min(abs(float(v)) / _cg_safe(vmax), 1.0) * 100
+    return f"background:linear-gradient(to right, {color} {pct:.1f}%, transparent {pct:.1f}%)"
+
+def _cg_diverging_bar_style(v, vmax, pos_color, neg_color):
+    if pd.isna(v) or v == 0:
+        return ""
+    half_pct = min(abs(float(v)) / _cg_safe(vmax), 1.0) * 50
+    if v >= 0:
+        lo, hi, color = 50.0, 50.0 + half_pct, pos_color
+    else:
+        lo, hi, color = 50.0 - half_pct, 50.0, neg_color
+    return (f"background:linear-gradient(to right, transparent {lo:.1f}%, "
+            f"{color} {lo:.1f}%, {color} {hi:.1f}%, transparent {hi:.1f}%)")
+
+def _cg_oi_chg_style(v, vmax):
+    if pd.isna(v):
+        return ""
+    return _cg_diverging_bar_style(v, vmax, "rgba(22,163,74,0.55)", "rgba(220,38,38,0.55)")
+
+def _cg_vol_style(v, vmax):
+    return _cg_bar_style(v, vmax, "rgba(56,189,248,0.55)")
+
+@st.cache_data(max_entries=50, show_spinner=False)
+def build_comprehensive_grid_html(code_lower: str, table_lookback: int):
+    """Verbatim port of the Futures dashboard's build_oi_vol_table_html —
+    same column layout, same heatmap/bar styling, same box-shadow group
+    dividers. Only the data source changed (this project's own Database/)."""
+    df_all_tbl = load_futures_full(code_lower).sort_values(["ice_symbol", "Date"])
+    df_all_tbl["oi_change"] = df_all_tbl.groupby("ice_symbol")["open_interest"].diff()
+    df_all_tbl["px_change"] = df_all_tbl.groupby("ice_symbol")["settlement"].pct_change() * 100
+
+    max_date_tbl = df_all_tbl["Date"].max()
+    cutoff_tbl   = max_date_tbl - pd.Timedelta(days=table_lookback)
+    win_tbl      = df_all_tbl[df_all_tbl["Date"] >= cutoff_tbl].copy()
+    if win_tbl.empty:
+        return None
+
+    ltd_map   = win_tbl.groupby("ice_symbol")["LTD"].first()
+    syms_tbl  = ltd_map.sort_values().index.tolist()
+    dates_tbl = sorted(win_tbl["Date"].unique(), reverse=True)
+
+    oi_piv  = (win_tbl.pivot_table(index="Date", columns="ice_symbol", values="open_interest", aggfunc="last")
+               .reindex(index=dates_tbl, columns=syms_tbl))
+    chg_piv = (win_tbl.pivot_table(index="Date", columns="ice_symbol", values="oi_change", aggfunc="last")
+               .reindex(index=dates_tbl, columns=syms_tbl))
+    vol_piv = (win_tbl.pivot_table(index="Date", columns="ice_symbol", values="volume", aggfunc="last")
+               .reindex(index=dates_tbl, columns=syms_tbl))
+    px_piv  = (win_tbl.pivot_table(index="Date", columns="ice_symbol", values="px_change", aggfunc="last")
+               .reindex(index=dates_tbl, columns=syms_tbl))
+
+    total_chg = chg_piv.sum(axis=1, min_count=1)
+    total_vol = vol_piv.sum(axis=1, min_count=1)
+
+    oi_col_min  = oi_piv.min(axis=0)
+    oi_col_max  = oi_piv.max(axis=0)
+    chg_col_max = chg_piv.abs().max(axis=0)
+    vol_col_max = vol_piv.max(axis=0)
+    px_col_max  = px_piv.abs().max(axis=0)
+    total_chg_absmax = float(total_chg.abs().max()) if total_chg.notna().any() else 1.0
+    total_vol_max    = float(total_vol.max())        if total_vol.notna().any() else 1.0
+    total_chg_absmax = total_chg_absmax if total_chg_absmax > 0 else 1.0
+    total_vol_max    = total_vol_max    if total_vol_max    > 0 else 1.0
+
+    css = """
+    <style>
+    .oivol-wrap { overflow:auto; max-height:640px; border:1px solid #e5e7eb; border-radius:6px; }
+    .oivol-tbl { border-collapse:collapse; font-size:9px; font-family:'Inter',sans-serif; white-space:nowrap; }
+    .oivol-tbl th, .oivol-tbl td { padding:2px 5px; text-align:center; border-bottom:1px solid #f0f0f0; }
+    .oivol-tbl th { position:sticky; top:0; background:#fafafa; font-weight:600; z-index:2; }
+    .oivol-tbl .grp-h { background:#eef2f7; }
+    .oivol-tbl .grp-start { box-shadow: inset 2px 0 0 0 #374151; }
+    .oivol-tbl .date-cell { position:sticky; left:0; background:#fff; text-align:center;
+                             font-weight:600; z-index:1; box-shadow: inset -2px 0 0 0 #374151; }
+    .oivol-tbl .tot-cell { background:#fffbea; font-weight:600; }
+    .oivol-tbl .sub-h { color:#888; font-weight:400; font-size:8px; }
+    </style>
+    """
+
+    h1 = '<tr><th class="date-cell" rowspan="2">Date</th>'
+    for s in syms_tbl:
+        h1 += f'<th class="grp-h grp-start" colspan="4">{s}</th>'
+    h1 += '<th class="tot-cell grp-start" colspan="2">Total</th></tr>'
+
+    h2 = "<tr>"
+    for s in syms_tbl:
+        h2 += ('<th class="sub-h grp-h grp-start">OI</th>'
+               '<th class="sub-h grp-h">ΔOI</th>'
+               '<th class="sub-h grp-h">PxΔ%</th>'
+               '<th class="sub-h grp-h">Vol</th>')
+    h2 += '<th class="sub-h tot-cell grp-start">ΔOI</th><th class="sub-h tot-cell">Vol</th></tr>'
+
+    rows = []
+    for d in dates_tbl:
+        d_str = pd.Timestamp(d).strftime("%d %b %Y")
+        row = f'<tr><td class="date-cell">{d_str}</td>'
+        for s in syms_tbl:
+            oi_v, chg_v, vol_v, px_v = oi_piv.at[d, s], chg_piv.at[d, s], vol_piv.at[d, s], px_piv.at[d, s]
+            oi_txt  = f"{oi_v:,.0f}"  if pd.notna(oi_v)  else ""
+            chg_txt = f"{chg_v:+,.0f}" if pd.notna(chg_v) else ""
+            vol_txt = f"{vol_v:,.0f}" if pd.notna(vol_v) else ""
+            px_txt  = f"{px_v:+.2f}%" if pd.notna(px_v)  else ""
+            row += f'<td class="grp-start" style="{_cg_oi_heatmap_style(oi_v, oi_col_min[s], oi_col_max[s])}">{oi_txt}</td>'
+            row += f'<td style="{_cg_oi_chg_style(chg_v, chg_col_max[s])}">{chg_txt}</td>'
+            row += f'<td style="{_cg_oi_chg_style(px_v, px_col_max[s])}">{px_txt}</td>'
+            row += f'<td style="{_cg_vol_style(vol_v, vol_col_max[s])}">{vol_txt}</td>'
+        tc, tv = total_chg.loc[d], total_vol.loc[d]
+        tc_txt = f"{tc:+,.0f}" if pd.notna(tc) else ""
+        tv_txt = f"{tv:,.0f}"  if pd.notna(tv) else ""
+        row += f'<td class="tot-cell grp-start" style="{_cg_oi_chg_style(tc, total_chg_absmax)}">{tc_txt}</td>'
+        row += f'<td class="tot-cell" style="{_cg_vol_style(tv, total_vol_max)}">{tv_txt}</td>'
+        row += "</tr>"
+        rows.append(row)
+
+    return (css + f'<div class="oivol-wrap"><table class="oivol-tbl"><thead>{h1}{h2}</thead>'
+            f'<tbody>{"".join(rows)}</tbody></table></div>')
 
 def year_month_heatmap(df: pd.DataFrame, date_col: str, value_col: str, title: str,
                         colorscale=None, zmid=None, key=None, pct=False):
@@ -190,9 +323,24 @@ tab_flat, tab_spread, tab_arb, tab_vol, tab_risk = st.tabs(
 #        + Futures dashboard's self-contained "All Contracts Rolling Volume"
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_flat:
-    f_price, f_pv, f_idx, f_dist, f_vol = st.tabs(
-        ["Price & OI", "Price & Vol", "Indexed Performance", "Return Distribution", "Rolling Volume"]
+    f_grid, f_price, f_pv, f_idx, f_dist, f_vol = st.tabs(
+        ["Comprehensive Grid", "Price & OI", "Price & Vol", "Indexed Performance",
+         "Return Distribution", "Rolling Volume"]
     )
+
+    with f_grid:
+        st.markdown(lbl(f"{commodity} — Daily OI & Volume by Contract Month"), unsafe_allow_html=True)
+        st.caption("Verbatim port of the Futures dashboard's Comprehensive Grid: green OI heatmap "
+                   "(white -> light green, scaled per contract), diverging bars for ΔOI/Px% "
+                   "(green right / red left from center), light-blue bars for Volume.")
+        grid_lookback = st.slider("Lookback (calendar days)", 30, 365, 90, step=10, key="grid_lookback")
+        for leg in legs:
+            st.markdown(f"**{leg}**")
+            html = build_comprehensive_grid_html(cfg["futures_codes"][leg], grid_lookback)
+            if html is None:
+                st.info("No data in this window.")
+            else:
+                st.markdown(html, unsafe_allow_html=True)
 
     with f_price:
         st.markdown(lbl(f"{commodity} — Continuous Price & Open Interest"), unsafe_allow_html=True)
@@ -353,8 +501,8 @@ with tab_flat:
 # SPREAD — verified ports of the Roll Yield dashboard
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_spread:
-    s_yield, s_rank, s_curve, s_heat, s_cost = st.tabs(
-        ["Yield & Curve", "Ranking & Percentile", "Forward Curves", "Roll Yield Heatmap", "Roll Cost"]
+    s_yield, s_rank, s_curve, s_heat = st.tabs(
+        ["Yield & Curve", "Ranking & Percentile", "Forward Curves", "Roll Yield Heatmap"]
     )
     ry = load_roll_yield()
     curve_cols = [f"c{i}" for i in range(1, 9)]
@@ -474,68 +622,6 @@ with tab_spread:
         year_month_heatmap(s, "Date", "Roll_Yield_1yr", "Avg Roll Yield", pct=True, zmid=0,
                            colorscale=[[0.0,"#8b0000"],[0.4,"#f5c6cb"],[0.5,"#ffffff"],[0.6,"#d4edda"],[1.0,"#1a6b1a"]],
                            key="ry_heatmap")
-
-    with s_cost:
-        st.markdown(lbl(f"{commodity} — Roll Cost (c2 − c1)"), unsafe_allow_html=True)
-        st.caption("Positive = contango (rolling forward costs you); negative = backwardation (rolling pays you). "
-                   "Same definition as the Roll Yield dashboard's Roll Cost tab.")
-        df_rc = ry.copy()
-        df_rc["roll_spread"] = df_rc["c2"] - df_rc["c1"]
-        df_rc["roll_pct"] = (df_rc["roll_spread"] / df_rc["c1"] * 100).round(3)
-        latest_rc = df_rc[df_rc["Date"] == df_rc["Date"].max()].set_index("Commodity")
-
-        fig_rc_line = base_fig(height=340, yaxis_title="c2 − c1")
-        for code in cfg["ry_codes"]:
-            s = df_rc[df_rc["Commodity"] == code].sort_values("Date")
-            fig_rc_line.add_trace(go.Scatter(x=s["Date"], y=s["roll_spread"].round(2), name=code, line=dict(width=1.6)))
-        fig_rc_line.add_hline(y=0, line_dash="dot", line_color="#aaaaaa")
-        st.plotly_chart(fig_rc_line, use_container_width=True)
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown(f"**Snapshot · {df_rc['Date'].max().strftime('%d/%m/%Y')}**")
-            snap_rows = []
-            for code in cfg["ry_codes"]:
-                if code not in latest_rc.index:
-                    continue
-                spread = latest_rc.loc[code, "roll_spread"]
-                pct    = latest_rc.loc[code, "roll_pct"]
-                lot_key = code.replace("RC", "LRC")
-                mult, rolls = LOT_SIZES.get(lot_key, 1), ROLLS_YR.get(lot_key, 1)
-                dol_lot, ann_lot = spread * mult, spread * mult * rolls
-                regime = "Contango" if spread > 0 else "Backwardation"
-                snap_rows.append({"Commodity": code, "Spread": f"{spread:+.2f}", "Spread %": f"{pct:+.2f}%",
-                                  "$/Lot": f"${dol_lot:+,.0f}", "Ann $/Lot": f"${ann_lot:+,.0f}", "Regime": regime})
-            snap_df = pd.DataFrame(snap_rows)
-            fig_snap = go.Figure(go.Table(
-                header=dict(values=list(snap_df.columns), fill_color=NAVY, font=dict(color="white", size=9),
-                           align="center", height=28),
-                cells=dict(values=[snap_df[c] for c in snap_df.columns], align="center", height=24,
-                          fill_color=[["white" if i % 2 == 0 else "#f5f5f7" for i in range(len(snap_df))]]),
-            ))
-            fig_snap.update_layout(height=200, margin=dict(t=0, b=0, l=0, r=0), **_D)
-            st.plotly_chart(fig_snap, use_container_width=True)
-        with c2:
-            st.markdown("**Seasonality — Avg by Month**")
-            seas_code = st.selectbox("Contract", cfg["ry_codes"], key="rc_seas_code")
-            seas = df_rc[df_rc["Commodity"] == seas_code].copy()
-            seas["Month"] = seas["Date"].dt.month
-            seas_avg = seas.groupby("Month")["roll_spread"].mean().reindex(range(1, 13))
-            colors_seas = [DRED if v > 0 else GREEN for v in seas_avg.fillna(0)]
-            fig_seas = go.Figure(go.Bar(x=MONTHS, y=seas_avg.values.round(2), marker_color=colors_seas,
-                                        text=[f"{v:.2f}" if not np.isnan(v) else "" for v in seas_avg.values],
-                                        textposition="outside", textfont=dict(size=8)))
-            fig_seas.add_hline(y=0, line_dash="dot", line_color="#aaaaaa")
-            fig_seas.update_layout(height=280, yaxis=dict(title="Avg c2−c1", gridcolor="#f0f0f0"),
-                                   margin=dict(t=10, b=10, l=4, r=4), **_D)
-            st.plotly_chart(fig_seas, use_container_width=True)
-
-        st.markdown("**Roll Spread Heatmap (Monthly Avg)**")
-        cost_heat_code = st.selectbox("Contract", cfg["ry_codes"], key="cost_heat_code")
-        s_cost_hm = df_rc[df_rc["Commodity"] == cost_heat_code].copy()
-        year_month_heatmap(s_cost_hm, "Date", "roll_spread", "Avg Roll Spread",
-                           colorscale=[[0.0,"#1a6b1a"],[0.4,"#d4edda"],[0.5,"#ffffff"],[0.6,"#f5c6cb"],[1.0,"#8b0000"]],
-                           zmid=0, key="rollcost_heatmap")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ARB — full verified port of the Arb dashboard's KC/RC spread section
