@@ -299,6 +299,91 @@ def load_options(code: str) -> pd.DataFrame:
     df["date"] = pd.to_datetime(df["date"])
     return df
 
+# ── COT (Disaggregated, Futures-only — same basis the COT_ALL matrix uses so
+#    every commodity, including RC which has no CIT report, sits on equal footing)
+DISAGG_SPEC = {
+    "Managed Money": {"long":"MM Long",       "short":"MM Short",       "net":"MM Net"},
+    "Other Rept":    {"long":"Other Long",    "short":"Other Short",    "net":"Other Net"},
+    "Non-Rep":       {"long":"Non Rep Long",  "short":"Non Rep Short",  "net":"Non Rep Net"},
+    "Swap Dealers":  {"long":"Swap Long",     "short":"Swap Short",     "net":"Swap Net"},
+    "MM + Other + Non-Rep": {"long":"MM+Other+NonRep Long","short":"MM+Other+NonRep Short","net":"MM+Other+NonRep Net"},
+    "MM + Non-Rep":         {"long":"MM+NonRep Long",      "short":"MM+NonRep Short",      "net":"MM+NonRep Net"},
+    "Commercial (Producer)": {"long":"Producer Long", "short":"Producer Short", "net":"Comm Net"},
+}
+COT_LOOKBACKS = [1, 3, 5, 10]
+
+def _cot_derive_nets(df):
+    pairs = [("MM Long","MM Short","MM Net"), ("Swap Long","Swap Short","Swap Net"),
+             ("Other Long","Other Short","Other Net"), ("Producer Long","Producer Short","Comm Net")]
+    for l, s, n in pairs:
+        if l in df.columns and s in df.columns and n not in df.columns:
+            df[n] = df[l] - df[s]
+    return df
+
+def _cot_add_pct(df):
+    for col in list(df.columns):
+        pct_col = f"Pct OI {col}"
+        if (pct_col not in df.columns and "Total OI" in df.columns
+                and col not in ("Date", "Commodity", "Crop") and not col.startswith(("Traders","Conc","Pct OI"))):
+            try:
+                df[pct_col] = (df[col] / df["Total OI"] * 100).round(2)
+            except Exception:
+                pass
+    return df
+
+@st.cache_data(ttl=1800)
+def load_cot_disagg() -> pd.DataFrame:
+    df = pd.read_parquet(DB / "cot_disagg_fut.parquet")
+    df["Date"] = pd.to_datetime(df["Date"])
+    num = [c for c in df.columns if c not in ("Date", "Commodity", "Crop")]
+    df[num] = df[num].astype(float)
+    df = _cot_derive_nets(df)
+    for side in ("Long", "Short"):
+        df[f"MM+Other+NonRep {side}"] = df.get(f"MM {side}", 0) + df.get(f"Other {side}", 0) + df.get(f"Non Rep {side}", 0)
+    df["MM+Other+NonRep Net"] = df["MM+Other+NonRep Long"] - df["MM+Other+NonRep Short"]
+    for side in ("Long", "Short"):
+        df[f"MM+NonRep {side}"] = df.get(f"MM {side}", 0) + df.get(f"Non Rep {side}", 0)
+    df["MM+NonRep Net"] = df["MM+NonRep Long"] - df["MM+NonRep Short"]
+    df = _cot_add_pct(df)
+    return df.sort_values(["Commodity", "Crop", "Date"]).reset_index(drop=True)
+
+def _cot_zscore(series: pd.Series, years: int) -> float:
+    if series.empty:
+        return np.nan
+    cutoff = series.index.max() - pd.DateOffset(years=years)
+    window = series[series.index >= cutoff]
+    if len(window) < 5 or window.std(ddof=0) == 0 or pd.isna(window.std(ddof=0)):
+        return np.nan
+    return float((series.iloc[-1] - window.mean()) / window.std(ddof=0))
+
+def _cot_style_z(v):
+    if pd.isna(v):
+        return ""
+    v = max(-3, min(3, v))
+    if v >= 0:
+        r, g, b = 255 - int(v/3*105), 235 - int(v/3*20), 130
+    else:
+        r, g, b = 250, 150 + int((v+3)/3*85), 120 + int((v+3)/3*60)
+    return f"background-color:rgb({r},{g},{b});color:#1a1a2e"
+
+# ── Currency (Coffee only — Cocoa branch of the source app not needed here) ────
+CCY_COUNTRIES_ARABICA = ["Brazil", "Colombia", "Honduras", "Ethiopia", "Peru"]
+CCY_COUNTRIES_ROBUSTA = ["Vietnam", "Brazil", "Indonesia", "Uganda", "India"]
+CCY_WEIGHTS_ARABICA = {"Brazil":54.0,"Colombia":20.7,"Honduras":7.4,"Ethiopia":11.9,"Peru":5.9}
+CCY_WEIGHTS_ROBUSTA = {"Vietnam":47.0,"Brazil":11.0,"Indonesia":17.0,"Uganda":16.0,"India":9.0}
+CCY_COLORS_ARABICA  = {"Brazil":"#4a7fb5","Colombia":"#e8c96a","Honduras":"#82c982","Ethiopia":"#e89090","Peru":"#c9a0dc"}
+CCY_COLORS_ROBUSTA  = {"Vietnam":"#e07b39","Brazil":"#4a7fb5","Indonesia":"#7ec8c0","Uganda":"#a0aad4","India":"#f4a460"}
+
+@st.cache_data(ttl=1800)
+def load_currency() -> pd.DataFrame:
+    df = pd.read_parquet(DB / "currency_data.parquet")
+    df["Date"] = pd.to_datetime(df["Date"])
+    return df.sort_values("Date").drop_duplicates(subset=["Date"], keep="last").reset_index(drop=True)
+
+def _ccy_rebase(series):
+    first = series.dropna().iloc[0] if not series.dropna().empty else 1
+    return series / first * 100
+
 # ── Header ──────────────────────────────────────────────────────────────────
 st.markdown(
     "<h2 style='font-family:\"Playfair Display\",Georgia,serif;color:#0a2463;"
@@ -314,8 +399,8 @@ cfg = COMMODITIES[commodity]
 legs = list(cfg["legs"].keys())          # e.g. ["KC", "LRC"]
 leg_colors = {legs[0]: NAVY, legs[1]: "#8b1a00"} if len(legs) > 1 else {legs[0]: NAVY}
 
-tab_flat, tab_spread, tab_arb, tab_vol, tab_risk = st.tabs(
-    ["Flat", "Spread", "Arb", "Volatility", "Risk"]
+tab_flat, tab_spread, tab_arb, tab_vol, tab_risk, tab_pos, tab_ccy = st.tabs(
+    ["Flat", "Spread", "Arb", "Volatility", "Risk", "Positioning", "Currency"]
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -323,9 +408,9 @@ tab_flat, tab_spread, tab_arb, tab_vol, tab_risk = st.tabs(
 #        + Futures dashboard's self-contained "All Contracts Rolling Volume"
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_flat:
-    f_grid, f_price, f_pv, f_idx, f_dist, f_vol = st.tabs(
+    f_grid, f_price, f_pv, f_idx, f_dist, f_vol, f_flow = st.tabs(
         ["Comprehensive Grid", "Price & OI", "Price & Vol", "Indexed Performance",
-         "Return Distribution", "Rolling Volume"]
+         "Return Distribution", "Rolling Volume", "OI & Volume Flow"]
     )
 
     with f_grid:
@@ -496,6 +581,66 @@ with tab_flat:
                                       legend=dict(orientation="h", y=-0.2, font=dict(size=8)),
                                       margin=dict(t=25, b=50, l=4, r=4), **_D)
                 st.plotly_chart(fig_abs, use_container_width=True, key=f"fvol_abs_{leg}")
+
+    with f_flow:
+        st.markdown(lbl(f"{commodity} — Daily OI Change vs Volume"), unsafe_allow_html=True)
+        st.caption("Adapted from the Futures dashboard's OI & Volume Flow tab — that version tracks a "
+                   "single selected contract; this rolls it up to whole-market OI/volume per leg since "
+                   "this page doesn't have a per-contract selector.")
+        flow_lookback = st.slider("Lookback (calendar days)", 30, 365, 180, step=15, key="flow_lookback")
+        oi_mode = st.radio("OI Δ (scatter)", ["Signed", "Absolute"], horizontal=True, key="flow_scatter_mode")
+        for leg in legs:
+            st.markdown(f"**{leg}**")
+            df_all = load_futures_full(cfg["futures_codes"][leg])
+            tot_oi = df_all.groupby("Date")["open_interest"].sum(min_count=1)
+            tot_vol = df_all.groupby("Date")["volume"].sum(min_count=1)
+            flow = pd.concat([tot_oi.rename("oi"), tot_vol.rename("vol")], axis=1).sort_index()
+            flow["oi_change"] = flow["oi"].diff()
+            flow = flow.dropna(subset=["oi_change"])
+            max_d = flow.index.max()
+            flow = flow[flow.index >= max_d - pd.Timedelta(days=flow_lookback)]
+            if flow.empty:
+                st.info("No data in this window.")
+                continue
+
+            c1, c2 = st.columns([3, 2])
+            with c1:
+                bar_colors = [GREEN if v >= 0 else RED for v in flow["oi_change"]]
+                fig_flow = make_subplots(specs=[[{"secondary_y": True}]])
+                fig_flow.add_trace(go.Bar(x=flow.index, y=flow["oi_change"], name="OI Change",
+                                          marker_color=bar_colors), secondary_y=False)
+                fig_flow.add_trace(go.Bar(x=flow.index, y=flow["vol"], name="Volume",
+                                          marker_color="rgba(150,150,150,0.45)"), secondary_y=True)
+                fig_flow.update_layout(height=380, barmode="overlay",
+                                       legend=dict(orientation="h", y=1.08, font=dict(size=8)),
+                                       margin=dict(t=25, b=8, l=4, r=4), **_D)
+                fig_flow.update_yaxes(title_text="OI Change", secondary_y=False, gridcolor="#f0f0f0")
+                fig_flow.update_yaxes(title_text="Volume", secondary_y=True, showgrid=False)
+                st.plotly_chart(fig_flow, use_container_width=True, key=f"flow_bar_{leg}")
+            with c2:
+                x_vals = flow["oi_change"] if oi_mode == "Signed" else flow["oi_change"].abs()
+                if len(flow) > 2 and x_vals.std() > 0:
+                    coeffs = np.polyfit(x_vals, flow["vol"], 1)
+                    x_line = np.linspace(x_vals.min(), x_vals.max(), 50)
+                    y_line = coeffs[0] * x_line + coeffs[1]
+                    r2 = x_vals.corr(flow["vol"]) ** 2
+                else:
+                    x_line = y_line = None
+                    r2 = float("nan")
+                fig_sc = go.Figure()
+                fig_sc.add_trace(go.Scatter(x=x_vals[:-1], y=flow["vol"].iloc[:-1], mode="markers",
+                                            marker=dict(color=leg_colors[leg], size=5, opacity=0.5), name="History"))
+                fig_sc.add_trace(go.Scatter(x=[x_vals.iloc[-1]], y=[flow["vol"].iloc[-1]], mode="markers",
+                                            marker=dict(color=RED, size=11, symbol="star"), name="Latest"))
+                if x_line is not None:
+                    fig_sc.add_trace(go.Scatter(x=x_line, y=y_line, mode="lines",
+                                                line=dict(color=GREY, width=1.5, dash="dash"), name=f"Fit (R²={r2:.2f})"))
+                fig_sc.update_layout(height=380, title=dict(text="OI Δ vs Volume", font=dict(size=11)),
+                                     xaxis=dict(title=f"OI Change ({oi_mode})", gridcolor="#f0f0f0"),
+                                     yaxis=dict(title="Volume", gridcolor="#f0f0f0"),
+                                     legend=dict(orientation="h", y=1.15, font=dict(size=8)),
+                                     margin=dict(t=25, b=8, l=4, r=4), **_D)
+                st.plotly_chart(fig_sc, use_container_width=True, key=f"flow_sc_{leg}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SPREAD — verified ports of the Roll Yield dashboard
@@ -825,3 +970,206 @@ with tab_risk:
         _, var_s = _leg_vol_var(leg_pick_h)
         vdf = var_s.rename("VaR").reset_index().rename(columns={"index": "Date"})
         year_month_heatmap(vdf, "Date", "VaR", "Avg VaR", key="var_heatmap")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POSITIONING — verified port of the COT_ALL spec_distribution_app's two tabs
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_pos:
+    if commodity == "Coffee":
+        p_matrix, p_dist = st.tabs(["Z-Score Matrix", "Distribution"])
+        cot = load_cot_disagg()
+
+        with p_matrix:
+            st.markdown(lbl("COT Z-Score Matrix — All Commodities, Disaggregated (Futures-only)"),
+                       unsafe_allow_html=True)
+            st.caption("Every commodity on the same basis (RC/LCC/LSU have no CIT report) — "
+                       "so this table isn't Coffee-only, it's shown here for context.")
+            st.caption(f"**Latest COT date:** {cot['Date'].max().strftime('%d %b %Y')}")
+            matrix_cat = st.selectbox("Category", list(DISAGG_SPEC.keys()), key="cot_matrix_cat")
+            mcols = DISAGG_SPEC[matrix_cat]
+            level_rows, chg_rows = {}, {}
+            for cmm in cot["Commodity"].unique():
+                d = cot[(cot["Commodity"] == cmm) & (cot["Crop"] == "All")].sort_values("Date")
+                net_col = mcols["net"]
+                if net_col not in d.columns or d.empty:
+                    level_rows[cmm] = {y: np.nan for y in COT_LOOKBACKS}
+                    chg_rows[cmm] = {y: np.nan for y in COT_LOOKBACKS}
+                    continue
+                level_s = pd.to_numeric(d.set_index("Date")[net_col], errors="coerce").dropna()
+                chg_s = level_s.diff().dropna()
+                level_rows[cmm] = {y: _cot_zscore(level_s, y) for y in COT_LOOKBACKS}
+                chg_rows[cmm] = {y: _cot_zscore(chg_s, y) for y in COT_LOOKBACKS}
+            level_df = pd.DataFrame(level_rows).T[COT_LOOKBACKS]
+            chg_df = pd.DataFrame(chg_rows).T[COT_LOOKBACKS]
+
+            mc1, mc2 = st.columns(2)
+            with mc1:
+                st.markdown(f"**{matrix_cat} Net — Z-score**")
+                st.dataframe(level_df.style.map(_cot_style_z).format("{:.2f}"), use_container_width=True)
+            with mc2:
+                st.markdown(f"**{matrix_cat} Weekly Change — Z-score**")
+                st.dataframe(chg_df.style.map(_cot_style_z).format("{:.2f}"), use_container_width=True)
+
+        with p_dist:
+            st.markdown(lbl(f"{commodity} — COT Positioning Distribution"), unsafe_allow_html=True)
+            leg_pick = st.selectbox("Leg", legs, key="cot_dist_leg")
+            cot_code = "RC" if leg_pick == "LRC" else leg_pick
+            d = cot[(cot["Commodity"] == cot_code) & (cot["Crop"] == "All")].sort_values("Date")
+            dist_cat = st.selectbox("Category", list(DISAGG_SPEC.keys()), key="cot_dist_cat")
+            cols_cat = DISAGG_SPEC[dist_cat]
+            lb_choice = st.radio("History window", ["All", "1y", "3y", "5y", "10y"],
+                                 horizontal=True, key="cot_dist_lb")
+            if lb_choice != "All":
+                cutoff = d["Date"].max() - pd.DateOffset(years=int(lb_choice.replace("y", "")))
+                d = d[d["Date"] >= cutoff]
+
+            missing = [c for c in cols_cat.values() if c not in d.columns]
+            if d.empty or missing:
+                st.warning("No data available for this leg/category.")
+            else:
+                metrics = [("Net", cols_cat["net"], "#1a56db"), ("Long", cols_cat["long"], GREEN),
+                          ("Short", cols_cat["short"], RED)]
+                fig = make_subplots(rows=1, cols=3, subplot_titles=[m[0] for m in metrics])
+                for i, (name, col, color) in enumerate(metrics, start=1):
+                    s = (pd.to_numeric(d[col], errors="coerce").dropna() / 1000.0)
+                    if s.empty:
+                        continue
+                    fig.add_trace(go.Histogram(x=s.values, marker_color=color, opacity=0.85,
+                                               showlegend=False), row=1, col=i)
+                    fig.add_vline(x=s.iloc[-1], line_dash="dash", line_color="#1a1a2e", row=1, col=i)
+                fig.update_layout(height=380, bargap=0.04,
+                                  yaxis=dict(title="Weeks (count)", gridcolor="#f0f0f0"),
+                                  margin=dict(t=30, b=10, l=4, r=4), **_D)
+                st.plotly_chart(fig, use_container_width=True)
+                st.caption(f"{dist_cat} Net/Long/Short (k lots), dashed line = latest "
+                          f"({d['Date'].max().strftime('%d %b %Y')}).")
+
+            st.markdown("**Rollex Price — Weekly % Change**")
+            rx = load_rollex(cfg["rollex_codes"][leg_pick])
+            px_lvl = d[["Date"]].merge(rx.rename(columns={"Close": "rollex_px"}), on="Date", how="inner")
+            px_chg = (px_lvl["rollex_px"].dropna().pct_change() * 100).dropna()
+            if px_chg.empty:
+                st.info("No overlapping weeks between COT dates and Rollex price data.")
+            else:
+                fig_px = go.Figure(go.Histogram(x=px_chg.values, marker_color=AMBER, opacity=0.85))
+                fig_px.add_vline(x=px_chg.iloc[-1], line_color="#1a1a2e", line_width=2)
+                fig_px.update_layout(height=320, xaxis=dict(title="Weekly Price Change %"),
+                                     yaxis=dict(title="Weeks (count)", gridcolor="#f0f0f0"),
+                                     margin=dict(t=15, b=10, l=4, r=4), **_D)
+                st.plotly_chart(fig_px, use_container_width=True)
+    else:
+        st.info("No COT mapping for this commodity yet.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CURRENCY — verified port of the Currency dashboard's Coffee branch
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_ccy:
+    if commodity == "Coffee":
+        ccy = load_currency()
+        min_d, max_d = ccy["Date"].min().date(), ccy["Date"].max().date()
+        default_start = max(pd.Timestamp("2020-01-01").date(), min_d)
+        d_start, d_end = st.slider("Date range", min_value=min_d, max_value=max_d,
+                                   value=(default_start, max_d), key="ccy_daterange")
+        dff = ccy[(ccy["Date"] >= pd.Timestamp(d_start)) & (ccy["Date"] <= pd.Timestamp(d_end))].copy()
+
+        st.markdown(lbl("Producer-Country Currencies, Indexed to Start (=100)"), unsafe_allow_html=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Arabica Basket**")
+            fig_ai = base_fig(height=340, yaxis_title="Indexed (start=100)")
+            for c in CCY_COUNTRIES_ARABICA:
+                fig_ai.add_trace(go.Scatter(x=dff["Date"], y=_ccy_rebase(dff[c]),
+                                            name=f"{c} ({CCY_WEIGHTS_ARABICA[c]:.0f}%)",
+                                            line=dict(color=CCY_COLORS_ARABICA.get(c,"#aaa"), width=1.4)))
+            fig_ai.add_trace(go.Scatter(x=dff["Date"], y=_ccy_rebase(dff["Arabica_Idx"]), name="Arabica Index",
+                                        line=dict(color=NAVY, width=2.5, dash="dash")))
+            fig_ai.add_hline(y=100, line_color="#cccccc", line_dash="dot")
+            st.plotly_chart(fig_ai, use_container_width=True)
+        with c2:
+            st.markdown("**Robusta Basket**")
+            fig_ri = base_fig(height=340, yaxis_title="Indexed (start=100)")
+            for c in CCY_COUNTRIES_ROBUSTA:
+                fig_ri.add_trace(go.Scatter(x=dff["Date"], y=_ccy_rebase(dff[c]),
+                                            name=f"{c} ({CCY_WEIGHTS_ROBUSTA[c]:.0f}%)",
+                                            line=dict(color=CCY_COLORS_ROBUSTA.get(c,"#aaa"), width=1.4)))
+            fig_ri.add_trace(go.Scatter(x=dff["Date"], y=_ccy_rebase(dff["Robusta_Idx"]), name="Robusta Index",
+                                        line=dict(color="#8b1a00", width=2.5, dash="dash")))
+            fig_ri.add_hline(y=100, line_color="#cccccc", line_dash="dot")
+            st.plotly_chart(fig_ri, use_container_width=True)
+
+        st.markdown(lbl("Currency Index vs Price"), unsafe_allow_html=True)
+        c3, c4 = st.columns(2)
+        for col, idx_col, idx_name, price_col, price_label, idx_color in [
+            (c3, "Arabica_Idx", "Arabica", "KC_Price", "KC Arabica (c/lb)", NAVY),
+            (c4, "Robusta_Idx", "Robusta", "RC_Price", "RC Robusta ($/t)", "#8b1a00"),
+        ]:
+            with col:
+                fig_p = make_subplots(specs=[[{"secondary_y": True}]])
+                fig_p.add_trace(go.Scatter(x=dff["Date"], y=dff[idx_col], name=f"{idx_name} Idx",
+                                           line=dict(color=idx_color, width=2)), secondary_y=False)
+                fig_p.add_trace(go.Scatter(x=dff["Date"], y=dff[price_col], name=price_label,
+                                           line=dict(color="#888", width=1.4, dash="dot")), secondary_y=True)
+                fig_p.update_layout(height=280, title=dict(text=f"{idx_name} Index vs {price_label}", font=dict(size=11)),
+                                    legend=dict(orientation="h", y=1.1, font=dict(size=8)),
+                                    margin=dict(t=25, b=8, l=4, r=4), **_D)
+                fig_p.update_yaxes(title_text=f"{idx_name} Index", secondary_y=False, gridcolor="#f0f0f0")
+                fig_p.update_yaxes(title_text=price_label, secondary_y=True, showgrid=False)
+                st.plotly_chart(fig_p, use_container_width=True, key=f"ccy_idxpx_{idx_name}")
+
+        st.markdown(lbl("Arabica vs Robusta Currency Index"), unsafe_allow_html=True)
+        c5, c6 = st.columns(2)
+        with c5:
+            fig3 = base_fig(height=280)
+            fig3.add_trace(go.Scatter(x=dff["Date"], y=dff["Arabica_Idx"], name="Arabica", line=dict(color=NAVY, width=2)))
+            fig3.add_trace(go.Scatter(x=dff["Date"], y=dff["Robusta_Idx"], name="Robusta", line=dict(color="#8b1a00", width=2)))
+            st.plotly_chart(fig3, use_container_width=True)
+        with c6:
+            st.markdown("**Spread: Arabica − Robusta Index**")
+            fig4 = go.Figure(go.Scatter(x=dff["Date"], y=dff["Spread_Ara_Rob"], mode="lines",
+                                        line=dict(color="#9b59b6", width=1.8), fill="tozeroy",
+                                        fillcolor="rgba(155,89,182,0.07)"))
+            fig4.add_hline(y=0, line_color="#cccccc")
+            fig4.update_layout(height=280, margin=dict(t=10, b=10, l=4, r=4), **_D)
+            st.plotly_chart(fig4, use_container_width=True)
+
+        st.markdown(lbl("Index vs Price — Correlation"), unsafe_allow_html=True)
+        c7, c8 = st.columns(2)
+        for col, idx_col, price_col, idx_name, price_name, color in [
+            (c7, "Arabica_Idx", "KC_Price", "Arabica Index", "KC Arabica (c/lb)", NAVY),
+            (c8, "Robusta_Idx", "RC_Price", "Robusta Index", "RC Robusta ($/t)", "#8b1a00"),
+        ]:
+            with col:
+                valid = dff.dropna(subset=[idx_col, price_col])
+                if valid.empty:
+                    st.info(f"No data for {idx_name} vs {price_name}")
+                    continue
+                r = valid[idx_col].corr(valid[price_col])
+                st.markdown(f"**{idx_name} vs {price_name} · r = {r:.3f}**")
+                fig_sc = go.Figure(go.Scatter(x=valid[idx_col], y=valid[price_col], mode="markers",
+                                              marker=dict(color=color, size=4, opacity=0.4)))
+                z = np.polyfit(valid[idx_col], valid[price_col], 1)
+                x_l = np.linspace(valid[idx_col].min(), valid[idx_col].max(), 100)
+                fig_sc.add_trace(go.Scatter(x=x_l, y=np.polyval(z, x_l), mode="lines",
+                                            line=dict(color="#cccccc", width=1.5, dash="dash")))
+                fig_sc.update_layout(height=280, showlegend=False,
+                                     xaxis=dict(title=idx_name, gridcolor="#f0f0f0"),
+                                     yaxis=dict(title=price_name, gridcolor="#f0f0f0"),
+                                     margin=dict(t=10, b=10, l=4, r=4), **_D)
+                st.plotly_chart(fig_sc, use_container_width=True, key=f"ccy_scatter_{idx_name}")
+
+        st.markdown(lbl("Latest Values & % Changes"), unsafe_allow_html=True)
+        last_row, prev_row = dff.iloc[-1], dff.iloc[-2] if len(dff) >= 2 else dff.iloc[-1]
+        y1_cut = dff[dff["Date"] <= (last_row["Date"] - pd.Timedelta(weeks=52))]
+        y1_row = y1_cut.iloc[-1] if not y1_cut.empty else last_row
+        all_countries = CCY_COUNTRIES_ARABICA + [c for c in CCY_COUNTRIES_ROBUSTA if c not in CCY_COUNTRIES_ARABICA]
+        rows = []
+        for c in all_countries + ["Arabica_Idx", "Robusta_Idx"]:
+            if c not in dff.columns:
+                continue
+            label = c if c not in ("Arabica_Idx", "Robusta_Idx") else c.replace("_Idx", " Index")
+            d1 = (last_row[c] - prev_row[c]) / prev_row[c] * 100 if prev_row[c] else 0
+            y1 = (last_row[c] - y1_row[c]) / y1_row[c] * 100 if y1_row[c] else 0
+            rows.append({"Name": label, "Latest": f"{last_row[c]:.4f}", "1D %": f"{d1:+.2f}%", "1Y %": f"{y1:+.1f}%"})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No currency mapping for this commodity yet.")
