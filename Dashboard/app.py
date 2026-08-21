@@ -30,7 +30,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 from pathlib import Path
 
-st.set_page_config(page_title="Landing Page", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Landing Page", layout="wide", initial_sidebar_state="expanded")
 
 # ── Local database (synced in by Code/ingest.py — see its docstring for why
 #    this project keeps its own copy instead of reading sibling repos directly) ─
@@ -70,11 +70,11 @@ SOURCE_URLS = {
 }
 
 def source_link(*names):
-    parts = " &nbsp;·&nbsp; ".join(
+    parts = " &nbsp;&nbsp;".join(
         f'<a href="{SOURCE_URLS[n]}" target="_blank" rel="noopener" '
-        f'style="color:#0a2463;font-weight:500;text-decoration:none;border-bottom:1px dotted #0a2463">'
-        f'&#8599; {n} (full detail)</a>' for n in names)
-    st.markdown(f'<div style="font-size:.75rem;margin-bottom:8px">Source: {parts}</div>',
+        f'style="color:#0a2463;font-weight:500;font-size:.72rem;text-decoration:none;'
+        f'letter-spacing:.02em">{n} &#8599;</a>' for n in names)
+    st.markdown(f'<div style="text-align:right;margin:-8px 0 4px">{parts}</div>',
                unsafe_allow_html=True)
 
 def lbl(text):
@@ -773,17 +773,15 @@ def _ccy_rebase(series):
     first = series.dropna().iloc[0] if not series.dropna().empty else 1
     return series / first * 100
 
-# ── Header ──────────────────────────────────────────────────────────────────
-st.markdown(
-    "<h2 style='font-family:\"Playfair Display\",Georgia,serif;color:#0a2463;"
-    "font-weight:400;letter-spacing:-.01em;margin-bottom:2px'>Landing Page</h2>",
-    unsafe_allow_html=True,
-)
-st.caption("One page per commodity, one tab per exposure — every chart reads live off "
-           "the same parquets the standalone dashboards use.")
-st.markdown("<hr>", unsafe_allow_html=True)
+# ── Sidebar — commodity chooser ─────────────────────────────────────────────
+with st.sidebar:
+    st.markdown(
+        "<h3 style='font-family:\"Playfair Display\",Georgia,serif;color:#0a2463;"
+        "font-weight:400;letter-spacing:-.01em;margin-bottom:1rem'>Landing Page</h3>",
+        unsafe_allow_html=True,
+    )
+    commodity = st.selectbox("Commodity", list(COMMODITIES.keys()), label_visibility="collapsed")
 
-commodity = st.selectbox("Commodity", list(COMMODITIES.keys()))
 cfg = COMMODITIES[commodity]
 legs = list(cfg["legs"].keys())          # e.g. ["KC", "LRC"]
 leg_colors = {legs[0]: NAVY, legs[1]: "#8b1a00"} if len(legs) > 1 else {legs[0]: NAVY}
@@ -806,9 +804,6 @@ with tab_flat:
 
     with f_grid:
         st.markdown(lbl(f"{commodity} — Daily OI & Volume by Contract Month"), unsafe_allow_html=True)
-        st.caption("Verbatim port of the Futures dashboard's Comprehensive Grid: green OI heatmap "
-                   "(white -> light green, scaled per contract), diverging bars for ΔOI/Px% "
-                   "(green right / red left from center), light-blue bars for Volume.")
         grid_lookback = st.slider("Lookback (calendar days)", 30, 365, 90, step=10, key="grid_lookback")
         for leg in legs:
             st.markdown(f"**{leg}**")
@@ -838,8 +833,6 @@ with tab_flat:
 
     with f_pv:
         st.markdown(lbl(f"{commodity} — Rollex Price & Rolling Volatility"), unsafe_allow_html=True)
-        st.caption("Port of the Rollex dashboard's Price & Vol tab: 20d/60d realized vol computed "
-                   "from the project's own rollex_ret series, annualized ×√252.")
         for leg in legs:
             rx = load_rollex(cfg["rollex_codes"][leg]).set_index("Date").sort_index()
             rx["vol20"] = rx["Ret"].rolling(20).std() * np.sqrt(252) * 100
@@ -934,8 +927,6 @@ with tab_flat:
 
     with f_vol:
         st.markdown(lbl(f"{commodity} — Rolling Volume, All Contracts"), unsafe_allow_html=True)
-        st.caption("Port of the Futures dashboard's 'All Contracts — Rolling Volume' section: "
-                   "every contract that traded within the lookback window, rolling-averaged.")
         roll_n = st.slider("Rolling window (days)", 1, 30, 10, key="fvol_rolln")
         lookback = st.slider("Lookback (calendar days)", 30, 365, 120, step=10, key="fvol_lookback")
         for leg in legs:
@@ -989,9 +980,6 @@ with tab_flat:
 
     with f_flow:
         st.markdown(lbl(f"{commodity} — Daily OI Change vs Volume"), unsafe_allow_html=True)
-        st.caption("Adapted from the Futures dashboard's OI & Volume Flow tab — that version tracks a "
-                   "single selected contract; this rolls it up to whole-market OI/volume per leg since "
-                   "this page doesn't have a per-contract selector.")
         flow_lookback = st.slider("Lookback (calendar days)", 30, 365, 180, step=15, key="flow_lookback")
         oi_mode = st.radio("OI Δ (scatter)", ["Signed", "Absolute"], horizontal=True, key="flow_scatter_mode")
         for leg in legs:
@@ -1049,9 +1037,6 @@ with tab_flat:
 
     with f_seas:
         st.markdown(lbl(f"{commodity} — Monthly Returns Heatmap"), unsafe_allow_html=True)
-        st.caption("Verbatim port of the Rollex dashboard's Seasonality tab. Avg/Std rows show the "
-                   "mean and spread of that month's return across all years; ICV = Avg/Std, a rough "
-                   "signal-to-noise read (higher = more consistent direction for that month).")
         for leg in legs:
             st.markdown(f"**{leg}**")
             rx = load_rollex(cfg["rollex_codes"][leg]).set_index("Date").sort_index()
@@ -1072,9 +1057,6 @@ with tab_flat:
 
     with f_corr:
         st.markdown(lbl("Return Correlation Matrix — All Commodities"), unsafe_allow_html=True)
-        st.caption("Verbatim port of the Rollex dashboard's full correlation matrix — deliberately "
-                   "shown across all 7 Rollex commodities, not just this page's current commodity, "
-                   "since a correlation matrix is only useful cross-commodity.")
         corr_lookback = st.slider("Lookback (calendar days)", 90, 1800, 730, step=90, key="corr_lookback")
         ret_data = {}
         for c in ALL_ROLLEX_COMMS:
@@ -1311,7 +1293,6 @@ with tab_arb:
             st.plotly_chart(fig_scat, use_container_width=True)
 
         st.markdown(lbl("KC/RC Price Ratio (Arabica/Robusta)"), unsafe_allow_html=True)
-        st.caption("Roasters blend the two; extreme ratios historically mean-revert as substitution economics kick in.")
         ratio = l1 / l2
         mu_r, sig_r = ratio.rolling(zscore_win).mean(), ratio.rolling(zscore_win).std()
         fig_ratio = base_fig(height=420, yaxis_title="KC/RC")
@@ -1334,11 +1315,6 @@ with tab_vol:
 
     with v_ivrv:
         st.markdown(lbl(f"{commodity} — Implied vs Realized Vol (simplified)"), unsafe_allow_html=True)
-        st.caption("Simplified snapshot: near-the-money average IV of the nearest listed expiry vs. "
-                   "20-day realized vol of the continuous price. This is NOT a port of the Options "
-                   "dashboard's real per-expiry futures-anchored ATM logic — that mapping is tightly "
-                   "coupled to that app's own session state. Use the standalone Options dashboard for "
-                   "the real term structure.")
 
         lookback = st.slider("Lookback (days)", 30, 365, 180, step=15, key="vol_lookback")
         fig_vol = base_fig(height=440, yaxis_title="Annualized Vol (%)")
@@ -1370,10 +1346,6 @@ with tab_vol:
 
     with v_bfy:
         st.markdown(lbl(f"{commodity} — OI Change + Volume Butterfly"), unsafe_allow_html=True)
-        st.caption("Verbatim port of the Options dashboard's butterfly table (same HTML/CSS, same "
-                   "OI-change/Volume color functions). ATM here = front-month futures settlement "
-                   "rounded to the nearest strike step (Nearest mode); the standalone Options "
-                   "dashboard also offers an Exact-strike mode and a manual ATM override.")
         leg_pick_b = st.selectbox("Leg", legs, key="bfy_leg")
         try:
             odf = load_options(leg_pick_b)
@@ -1443,9 +1415,6 @@ with tab_vol:
 
     with v_rvseas:
         st.markdown(lbl(f"{commodity} — Monthly Realized Volatility Heatmap"), unsafe_allow_html=True)
-        st.caption("Verbatim port of the Rollex dashboard's Seasonality tab (the RV half). Same "
-                   "rolling-vol calc used in Risk's Vol Percentile — resampled to month-end here "
-                   "to show which months tend to run hot or quiet.")
         rv_window = st.radio("Window", ["20d", "60d", "120d"], horizontal=True, key="rvseas_window")
         win = {"20d": 20, "60d": 60, "120d": 120}[rv_window]
         for leg in legs:
@@ -1506,8 +1475,6 @@ with tab_risk:
             fig_risk.add_trace(go.Scatter(x=combined.index, y=combined.round(0),
                                           name=f"{commodity} Combined (1 lot each)", line=dict(color=NAVY, width=2.4)))
         st.plotly_chart(fig_risk, use_container_width=True)
-        st.caption("Same parametric method as the standalone VaR Monitor: settlement × lot size × "
-                   "rolling-vol × 2.3263 (one-tailed 99%). Combined line assumes 1 lot per leg.")
 
     with r_pct:
         st.markdown(lbl(f"{commodity} — Current Volatility Percentile vs Full History"), unsafe_allow_html=True)
@@ -1553,10 +1520,6 @@ with tab_pos:
 
         with p_recap:
             st.markdown(lbl(f"{commodity} — COT Recap"), unsafe_allow_html=True)
-            st.caption("Verbatim port of the COT dashboard's Recap tab (Disagg branch only — this "
-                       "project doesn't ingest the CIT report). The deeper expanders from the source "
-                       "(OI by category, Nominal Exposure, # of Traders, k lots/Trader) aren't "
-                       "included here — this covers the three headline tables.")
             leg_pick_recap0 = st.selectbox("Leg", legs, key="recap_leg0")
             cot_code_r0 = "RC" if leg_pick_recap0 == "LRC" else leg_pick_recap0
             d_recap = cot[(cot["Commodity"] == cot_code_r0) & (cot["Crop"] == "All")]
@@ -1582,9 +1545,6 @@ with tab_pos:
 
             st.markdown("<hr>", unsafe_allow_html=True)
             st.markdown(lbl(f"{commodity} — Quick Recap, All Categories"), unsafe_allow_html=True)
-            st.caption("Net position, week-over-week change, and 3-year z-score for every "
-                       "category, KC and LRC side by side. Disaggregated (Futures-only), same "
-                       "basis as the Z-Score Matrix.")
             recap_rows = []
             for cat_name, cat_cols in DISAGG_SPEC.items():
                 row = {"Category": cat_name}
@@ -1604,7 +1564,6 @@ with tab_pos:
                     row[f"{leg} Z (3y)"] = round(_cot_zscore(s, 3), 2)
                 recap_rows.append(row)
             recap_df = pd.DataFrame(recap_rows)
-            st.caption(f"Net and 1wk Δ in k lots · Latest COT date: {cot['Date'].max().strftime('%d %b %Y')}")
             st.dataframe(recap_df, use_container_width=True, hide_index=True)
 
             st.markdown("**Net Positioning — History**")
@@ -1626,9 +1585,6 @@ with tab_pos:
 
         with p_recap_ch:
             st.markdown(lbl(f"{commodity} — COT Recap Charts"), unsafe_allow_html=True)
-            st.caption("Verbatim port of the COT dashboard's Recap (Charts) tab, Disagg branch "
-                       "(12-panel grid). The 'Roll Yield vs Positioning' scatter section at the "
-                       "bottom of the source tab wasn't ported.")
             leg_pick_rc = st.selectbox("Leg", legs, key="recap_ch_leg")
             cot_code_rc = "RC" if leg_pick_rc == "LRC" else leg_pick_rc
             d_rc = cot[(cot["Commodity"] == cot_code_rc) & (cot["Crop"] == "All")].sort_values("Date").reset_index(drop=True)
@@ -1681,10 +1637,6 @@ with tab_pos:
 
         with p_pain:
             st.markdown(lbl(f"{commodity} — Pain Trade Monitor (first visual)"), unsafe_allow_html=True)
-            st.caption("Verbatim port of the Pain Trade Monitor's first chart only, as requested — "
-                       "Spec Legs weekly change (Long Add/Liq, Short Add/Cover) vs Rollex price. "
-                       "The source tab has a second visual (Rollex vs COT breakdown scatter) not "
-                       "ported here.")
             leg_pick_pt = st.selectbox("Leg", legs, key="pain_leg")
             cot_code_pt = "RC" if leg_pick_pt == "LRC" else leg_pick_pt
             d_pt = cot[(cot["Commodity"] == cot_code_pt) & (cot["Crop"] == "All")].copy()
@@ -1770,9 +1722,6 @@ with tab_pos:
         with p_matrix:
             st.markdown(lbl("COT Z-Score Matrix — All Commodities, Disaggregated (Futures-only)"),
                        unsafe_allow_html=True)
-            st.caption("Every commodity on the same basis (RC/LCC/LSU have no CIT report) — "
-                       "so this table isn't Coffee-only, it's shown here for context.")
-            st.caption(f"**Latest COT date:** {cot['Date'].max().strftime('%d %b %Y')}")
             matrix_cat = st.selectbox("Category", list(DISAGG_SPEC.keys()), key="cot_matrix_cat")
             mcols = DISAGG_SPEC[matrix_cat]
             level_rows, chg_rows = {}, {}
@@ -1829,8 +1778,6 @@ with tab_pos:
                                   yaxis=dict(title="Weeks (count)", gridcolor="#f0f0f0"),
                                   margin=dict(t=30, b=10, l=4, r=4), **_D)
                 st.plotly_chart(fig, use_container_width=True)
-                st.caption(f"{dist_cat} Net/Long/Short (k lots), dashed line = latest "
-                          f"({d['Date'].max().strftime('%d %b %Y')}).")
 
             st.markdown("**Rollex Price — Weekly % Change**")
             rx = load_rollex(cfg["rollex_codes"][leg_pick])
