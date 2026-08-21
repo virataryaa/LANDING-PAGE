@@ -202,6 +202,160 @@ def build_comprehensive_grid_html(code_lower: str, table_lookback: int):
     return (css + f'<div class="oivol-wrap"><table class="oivol-tbl"><thead>{h1}{h2}</thead>'
             f'<tbody>{"".join(rows)}</tbody></table></div>')
 
+# ── Options butterfly table — verbatim port of the Options dashboard's
+#    render_commodity_tab "OI Change + Volume" inner tab (butterfly_html +
+#    _change_pivot/get_vol_pivot + oi_color/vol_color) ────────────────────────
+BFY_CALL_CODES = {1:"A",2:"B",3:"C",4:"D",5:"E",6:"F",7:"G",8:"H",9:"I",10:"J",11:"K",12:"L"}
+BFY_PUT_CODES  = {1:"M",2:"N",3:"O",4:"P",5:"Q",6:"R",7:"S",8:"T",9:"U",10:"V",11:"W",12:"X"}
+
+def _bfy_month_keys(df):
+    return (df[["expiry_month", "expiry_year"]].drop_duplicates()
+            .sort_values(["expiry_year", "expiry_month"])
+            .apply(lambda r: (int(r.expiry_month), int(r.expiry_year)), axis=1).tolist())
+
+def _bfy_meta(df, opt):
+    return (df[df["option_type"] == opt][["ric", "strike", "expiry_month", "expiry_year"]]
+            .drop_duplicates()
+            .assign(mk=lambda x: list(zip(x.expiry_month.astype(int), x.expiry_year.astype(int))))
+            .set_index("ric"))
+
+def _bfy_clean(pivot, month_keys):
+    if pivot.empty:
+        return pivot
+    pivot = pivot.reindex(columns=month_keys)
+    return pivot.apply(lambda c: pd.to_numeric(c, errors="coerce")).astype(float)
+
+def _bfy_change_pivot(df, month_keys, opt, src, old_date, new_date):
+    d1 = df[(df["date"].dt.date == old_date) & (df["option_type"] == opt)][["ric", src]].set_index("ric")
+    d2 = df[(df["date"].dt.date == new_date) & (df["option_type"] == opt)][["ric", src]].set_index("ric")
+    merged = d1.join(d2, how="outer", lsuffix="_1", rsuffix="_2")
+    merged["val"] = pd.to_numeric(merged[src+"_2"], errors="coerce") - pd.to_numeric(merged[src+"_1"], errors="coerce")
+    meta = _bfy_meta(df, opt)
+    result = merged.join(meta[["strike", "mk"]]).dropna(subset=["strike"])
+    result = result[result["mk"].notna()]
+    piv = result.pivot_table(index="strike", columns="mk", values="val", aggfunc="first")
+    return _bfy_clean(piv, month_keys).sort_index(ascending=False)
+
+def _bfy_vol_pivot(df, month_keys, opt, old_date, new_date):
+    lo, hi = min(old_date, new_date), max(old_date, new_date)
+    sub = df[(df["option_type"] == opt) & (df["date"].dt.date >= lo) & (df["date"].dt.date <= hi)].copy()
+    sub["mk"] = list(zip(sub["expiry_month"].astype(int), sub["expiry_year"].astype(int)))
+    sub["volume"] = pd.to_numeric(sub["volume"], errors="coerce")
+    piv = sub.groupby(["strike", "mk"])["volume"].sum().unstack("mk")
+    return _bfy_clean(piv, month_keys).sort_index(ascending=False)
+
+def _bfy_tot(piv):
+    if piv.empty or piv.notna().to_numpy().sum() == 0:
+        return float("nan")
+    return float(piv.sum(skipna=True).sum())
+
+def _bfy_alpha(v, mx):
+    return round(0.15 + min(abs(float(v)) / max(mx, 0.01), 1.0) * 0.50, 2)
+
+def _bfy_oi_color(val, mx):
+    if pd.isna(val) or val == 0: return ""
+    a = _bfy_alpha(val, mx)
+    return (f"background:rgba(66,133,244,{a});color:#1a1a2e" if val > 0
+            else f"background:rgba(220,75,75,{a});color:#1a1a2e")
+
+def _bfy_vol_color(val, mx):
+    if pd.isna(val) or val == 0: return ""
+    return f"background:rgba(66,133,244,{_bfy_alpha(val, mx)});color:#1a1a2e"
+
+_BFY_CSS = """<style>
+.bft{border-collapse:collapse;font-size:11px;font-family:-apple-system,sans-serif}
+.bft th,.bft td{white-space:nowrap;padding:2px 5px}
+.bft th{font-weight:600;letter-spacing:.03em;font-size:10px;text-align:center}
+.bft td{text-align:right;border:1px solid #f0f0f0;color:#1a1a2e}
+.bft .sc{text-align:center;font-weight:700;font-size:11px;color:#1a1a2e;
+         background:#f5f5f5;border-left:2px solid #ccc;border-right:2px solid #ccc}
+.bft .sc-atm{background:#f59e0b!important;color:#1a1a2e!important;font-weight:900!important}
+.bft tr.atm-row td{border-top:2px solid #f59e0b!important;border-bottom:2px solid #f59e0b!important}
+.bft tfoot td{font-weight:700;border-top:2px solid #bbb}
+.bft tfoot .sc{font-size:9px;color:#888;background:#efefef}
+.ch{background:#dce8fb;color:#1a56cc}
+.ph{background:#fde8e8;color:#c0392b}
+.kch{background:#ebebeb;color:#555}
+</style>"""
+
+def bfy_butterfly_html(cpiv, ppiv, atm, cfn, month_keys, fmt="{:.0f}", footer=True, title="",
+                       fixed_strikes=None, snap_tol=None):
+    ccols, pcols = list(reversed(month_keys)), list(month_keys)
+    strikes = list(fixed_strikes) if fixed_strikes is not None else sorted(
+        set(cpiv.index.tolist() if not cpiv.empty else []) | set(ppiv.index.tolist() if not ppiv.empty else []))
+    if not strikes:
+        return "<p>No strikes in range.</p>"
+
+    def _flat(p):
+        return p.values.astype(float).flatten() if not p.empty else np.array([], dtype=float)
+    av = np.concatenate([_flat(cpiv), _flat(ppiv)])
+    av = av[~np.isnan(av)]
+    mx = float(np.max(np.abs(av))) if len(av) > 0 else 1.0
+    nc, npu = len(ccols), len(pcols)
+
+    h1 = (f'<tr><th colspan="{nc}" class="ch">Call</th><th class="kch">{title}</th>'
+          f'<th colspan="{npu}" class="ph">Put</th></tr>')
+    h2 = ('<tr>' + "".join(f'<th class="ch" style="color:#999;font-weight:400">{BFY_CALL_CODES[m]}{str(y)[-2:]}</th>' for m, y in ccols)
+          + '<th class="kch"></th>'
+          + "".join(f'<th class="ph" style="color:#ccc;font-weight:400">{BFY_PUT_CODES[m]}{str(y)[-2:]}</th>' for m, y in pcols) + '</tr>')
+    h3 = ('<tr>' + "".join(f'<th class="ch">{MONTHS[m-1]}</th>' for m, y in ccols) + '<th class="kch"></th>'
+          + "".join(f'<th class="ph">{MONTHS[m-1]}</th>' for m, y in pcols) + '</tr>')
+
+    idx_cache = {}
+    def cv(piv, s, mk):
+        if piv.empty or mk not in piv.columns:
+            return np.nan
+        if snap_tol is not None:
+            pid = id(piv)
+            if pid not in idx_cache:
+                idx_cache[pid] = np.array(piv.index.tolist(), dtype=float)
+            idx_arr = idx_cache[pid]
+            if len(idx_arr) == 0:
+                return np.nan
+            diffs = np.abs(idx_arr - s)
+            if diffs.min() > snap_tol:
+                return np.nan
+            s = idx_arr[diffs.argmin()]
+        elif s not in piv.index:
+            return np.nan
+        v = piv.at[s, mk]
+        return float(v) if not pd.isna(v) else np.nan
+
+    def td(v):
+        style = cfn(v, mx)
+        txt = (fmt.format(v)) if not np.isnan(v) and v != 0 else ""
+        return f'<td style="{style}">{txt}</td>'
+
+    if len(strikes) >= 2:
+        gaps = [abs(strikes[i]-strikes[i+1]) for i in range(len(strikes)-1)]
+        atm_tol = min(gaps) * 0.6
+    else:
+        atm_tol = 1.0
+
+    body = []
+    for s in strikes:
+        is_atm = atm is not None and abs(s - atm) < atm_tol
+        sc = "sc sc-atm" if is_atm else "sc"
+        tr_cls = ' class="atm-row"' if is_atm else ""
+        lbl_s = int(s) if s == int(s) else s
+        row = ("".join(td(cv(cpiv, s, mk)) for mk in ccols) + f'<td class="{sc}">{lbl_s}</td>'
+               + "".join(td(cv(ppiv, s, mk)) for mk in pcols))
+        body.append(f"<tr{tr_cls}>{row}</tr>")
+
+    ft = ""
+    if footer:
+        def cs(piv, mk):
+            if piv.empty or mk not in piv.columns or piv[mk].notna().sum() == 0:
+                return float("nan")
+            return float(piv[mk].sum(skipna=True))
+        cft = "".join(td(cs(cpiv, mk)) for mk in ccols)
+        pft = "".join(td(cs(ppiv, mk)) for mk in pcols)
+        ft = f'<tfoot><tr>{cft}<td class="sc" style="font-size:9px;color:#888">TOT</td>{pft}</tr></tfoot>'
+
+    est_h = max(400, (len(strikes) + 4) * 22 + 90)
+    return (f'{_BFY_CSS}<div style="overflow-x:auto;overflow-y:auto;max-height:{est_h}px">'
+            f'<table class="bft"><thead>{h1}{h2}{h3}</thead>{ft}<tbody>{"".join(body)}</tbody></table></div>')
+
 def year_month_heatmap(df: pd.DataFrame, date_col: str, value_col: str, title: str,
                         colorscale=None, zmid=None, key=None, pct=False):
     d = df.dropna(subset=[value_col]).copy()
@@ -866,40 +1020,111 @@ with tab_arb:
 # VOLATILITY — unchanged: simplified stand-in, explicitly labeled as such
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_vol:
-    st.markdown(lbl(f"{commodity} — Implied vs Realized Vol (simplified)"), unsafe_allow_html=True)
-    st.caption("Simplified snapshot: near-the-money average IV of the nearest listed expiry vs. "
-               "20-day realized vol of the continuous price. This is NOT a port of the Options "
-               "dashboard's real per-expiry futures-anchored ATM logic — that mapping is tightly "
-               "coupled to that app's own session state. Use the standalone Options dashboard for "
-               "the real term structure.")
+    v_ivrv, v_bfy = st.tabs(["IV vs RV (Simplified)", "OI Change + Volume Butterfly"])
 
-    lookback = st.slider("Lookback (days)", 30, 365, 180, step=15, key="vol_lookback")
-    fig_vol = base_fig(height=440, yaxis_title="Annualized Vol (%)")
-    for leg in legs:
+    with v_ivrv:
+        st.markdown(lbl(f"{commodity} — Implied vs Realized Vol (simplified)"), unsafe_allow_html=True)
+        st.caption("Simplified snapshot: near-the-money average IV of the nearest listed expiry vs. "
+                   "20-day realized vol of the continuous price. This is NOT a port of the Options "
+                   "dashboard's real per-expiry futures-anchored ATM logic — that mapping is tightly "
+                   "coupled to that app's own session state. Use the standalone Options dashboard for "
+                   "the real term structure.")
+
+        lookback = st.slider("Lookback (days)", 30, 365, 180, step=15, key="vol_lookback")
+        fig_vol = base_fig(height=440, yaxis_title="Annualized Vol (%)")
+        for leg in legs:
+            try:
+                odf = load_options(leg)
+            except FileNotFoundError:
+                continue
+            max_d = odf["date"].max()
+            near_key = odf.loc[odf["date"] == max_d].sort_values(["expiry_year", "expiry_month"])
+            if near_key.empty:
+                continue
+            fy, fm = near_key.iloc[0][["expiry_year", "expiry_month"]]
+            front = odf[(odf["expiry_year"] == fy) & (odf["expiry_month"] == fm)].copy()
+            front = front[front["date"] >= max_d - pd.Timedelta(days=lookback)]
+            daily_atm = front.dropna(subset=["strike"]).groupby("date")["strike"].median().rename("mid_strike")
+            front = front.join(daily_atm, on="date")
+            near = front[(front["strike"] >= front["mid_strike"] * 0.95) &
+                         (front["strike"] <= front["mid_strike"] * 1.05)]
+            iv_series = near.dropna(subset=["impvol"]).groupby("date")["impvol"].mean()
+
+            rx = load_rollex(cfg["rollex_codes"][leg]).set_index("Date").sort_index()
+            log_ret = np.log(rx["Close"] / rx["Close"].shift(1))
+            rv_series = (log_ret.rolling(20).std() * np.sqrt(252) * 100).tail(lookback)
+
+            fig_vol.add_trace(go.Scatter(x=iv_series.index, y=iv_series.values, name=f"{leg} IV (ATM-ish)", line=dict(width=1.8)))
+            fig_vol.add_trace(go.Scatter(x=rv_series.index, y=rv_series.values, name=f"{leg} RV (20d)", line=dict(width=1.4, dash="dot")))
+        st.plotly_chart(fig_vol, use_container_width=True)
+
+    with v_bfy:
+        st.markdown(lbl(f"{commodity} — OI Change + Volume Butterfly"), unsafe_allow_html=True)
+        st.caption("Verbatim port of the Options dashboard's butterfly table (same HTML/CSS, same "
+                   "OI-change/Volume color functions). ATM here = front-month futures settlement "
+                   "rounded to the nearest strike step (Nearest mode); the standalone Options "
+                   "dashboard also offers an Exact-strike mode and a manual ATM override.")
+        leg_pick_b = st.selectbox("Leg", legs, key="bfy_leg")
         try:
-            odf = load_options(leg)
+            odf = load_options(leg_pick_b)
         except FileNotFoundError:
-            continue
-        max_d = odf["date"].max()
-        near_key = odf.loc[odf["date"] == max_d].sort_values(["expiry_year", "expiry_month"])
-        if near_key.empty:
-            continue
-        fy, fm = near_key.iloc[0][["expiry_year", "expiry_month"]]
-        front = odf[(odf["expiry_year"] == fy) & (odf["expiry_month"] == fm)].copy()
-        front = front[front["date"] >= max_d - pd.Timedelta(days=lookback)]
-        daily_atm = front.dropna(subset=["strike"]).groupby("date")["strike"].median().rename("mid_strike")
-        front = front.join(daily_atm, on="date")
-        near = front[(front["strike"] >= front["mid_strike"] * 0.95) &
-                     (front["strike"] <= front["mid_strike"] * 1.05)]
-        iv_series = near.dropna(subset=["impvol"]).groupby("date")["impvol"].mean()
+            odf = pd.DataFrame()
+        if odf.empty:
+            st.info(f"No options data available for {leg_pick_b}.")
+        else:
+            all_dates = sorted(odf["date"].dt.date.unique())
+            days_back = st.slider("Days back for Old Date", 1, min(60, len(all_dates)-1), 5, key="bfy_daysback")
+            new_date = all_dates[-1]
+            old_date = all_dates[-1 - days_back]
 
-        rx = load_rollex(cfg["rollex_codes"][leg]).set_index("Date").sort_index()
-        log_ret = np.log(rx["Close"] / rx["Close"].shift(1))
-        rv_series = (log_ret.rolling(20).std() * np.sqrt(252) * 100).tail(lookback)
+            front = load_front_price(cfg["futures_codes"][leg_pick_b])
+            price = float(front["settlement"].dropna().iloc[-1])
+            all_strikes_data = sorted(odf["strike"].dropna().unique())
+            if len(all_strikes_data) > 1:
+                diffs = [all_strikes_data[i+1] - all_strikes_data[i] for i in range(len(all_strikes_data)-1)]
+                step = sorted(diffs)[len(diffs)//2]
+            else:
+                step = 1.0
+            atm = round(price / step) * step if step > 0 else price
+            snap_tol = step / 2
+            N = 35
+            all_strikes = [round(atm + i*step, 6) for i in range(-N, N+1) if atm + i*step > 0]
 
-        fig_vol.add_trace(go.Scatter(x=iv_series.index, y=iv_series.values, name=f"{leg} IV (ATM-ish)", line=dict(width=1.8)))
-        fig_vol.add_trace(go.Scatter(x=rv_series.index, y=rv_series.values, name=f"{leg} RV (20d)", line=dict(width=1.4, dash="dot")))
-    st.plotly_chart(fig_vol, use_container_width=True)
+            month_keys = _bfy_month_keys(odf)
+            call_oi  = _bfy_change_pivot(odf, month_keys, "Call", "oi", old_date, new_date)
+            put_oi   = _bfy_change_pivot(odf, month_keys, "Put",  "oi", old_date, new_date)
+            call_vol = _bfy_vol_pivot(odf, month_keys, "Call", old_date, new_date)
+            put_vol  = _bfy_vol_pivot(odf, month_keys, "Put",  old_date, new_date)
+
+            c_oi, p_oi   = _bfy_tot(call_oi),  _bfy_tot(put_oi)
+            c_vol, p_vol = _bfy_tot(call_vol), _bfy_tot(put_vol)
+            def _bfy_fn(v):
+                return "—" if pd.isna(v) else f"{v:,.0f}"
+            cp_oi = (f"{abs(c_oi/p_oi):.2f}" if p_oi and not np.isnan(p_oi) and p_oi != 0 and not np.isnan(c_oi) else "—")
+
+            items = [("ATM Price", f"{atm:,.2f}"), ("Old Date", old_date.strftime("%d %b %Y")),
+                     ("New Date", new_date.strftime("%d %b %Y")), ("Call OI Δ", _bfy_fn(c_oi)),
+                     ("Put OI Δ", _bfy_fn(p_oi)), ("Call Volume", _bfy_fn(c_vol)),
+                     ("Put Volume", _bfy_fn(p_vol)), ("C/P OI Ratio", cp_oi)]
+            st.markdown('<div style="display:flex;gap:24px;padding:6px 0 12px;border-bottom:1px solid #eee;flex-wrap:wrap">'
+                       + "".join(f'<div><div style="font-size:9px;color:#888;letter-spacing:.07em;'
+                                f'text-transform:uppercase;margin-bottom:2px">{k}</div>'
+                                f'<div style="font-size:14px;font-weight:600;color:#1a1a2e">{v}</div></div>'
+                                for k, v in items) + '</div>', unsafe_allow_html=True)
+
+            cl, cr = st.columns(2)
+            with cl:
+                st.markdown("**OI Change**")
+                st.markdown(bfy_butterfly_html(call_oi, put_oi, atm, _bfy_oi_color, month_keys,
+                                              fmt="{:.0f}", footer=True, title=leg_pick_b,
+                                              fixed_strikes=all_strikes, snap_tol=snap_tol),
+                           unsafe_allow_html=True)
+            with cr:
+                st.markdown("**Volume**")
+                st.markdown(bfy_butterfly_html(call_vol, put_vol, atm, _bfy_vol_color, month_keys,
+                                              fmt="{:.0f}", footer=True, title=leg_pick_b,
+                                              fixed_strikes=all_strikes, snap_tol=snap_tol),
+                           unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # RISK — verified ports of the VaR project's Parametric VaR tab
