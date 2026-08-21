@@ -55,6 +55,28 @@ st.markdown("""<style>
 _D = dict(template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
           font=dict(family="-apple-system,Helvetica Neue,sans-serif", color=BLACK, size=10))
 
+# ── Source links — URLs taken from the Homepage hub (icebreaker.html)'s LINKS
+#    object, LSEG entries, so a user can jump to the real app for depth ───────
+SOURCE_URLS = {
+    "Rollex":      "https://interim-migration-rollex-nhawujes2vizbbacqtxkgf.streamlit.app/",
+    "Roll Yield":  "https://interim-migration-rollyield-nr4yksj7oq3g3jygs73j7e.streamlit.app/",
+    "Arb":         "https://interim-migration-arb-6fxwrbfx4539voujkhv6di.streamlit.app/",
+    "Options":     "https://interim-migration-options-aa7ck2bsxhxgkbnczleggq.streamlit.app/",
+    "Futures OI":  "https://interim-migration-futures-oi-3ojs8tugpuxycdfh9nrtdn.streamlit.app/",
+    "VaR":         "https://interim-migration-var-st5pdh27fxp8feev8wuppw.streamlit.app/",
+    "COT Comprehensive": "https://interim-migration-cot-all-dviic3fxsojoe9xvqmxzzs.streamlit.app/",
+    "COT Distribution":  "https://interim-migration-cot-all-4yhhgv3dfzrsz9krjrlhyp.streamlit.app/",
+    "Currency":    "https://interim-migration-currency-ejlqfktneqqxqqdmxz8dwp.streamlit.app/",
+}
+
+def source_link(*names):
+    parts = " &nbsp;·&nbsp; ".join(
+        f'<a href="{SOURCE_URLS[n]}" target="_blank" rel="noopener" '
+        f'style="color:#0a2463;font-weight:500;text-decoration:none;border-bottom:1px dotted #0a2463">'
+        f'&#8599; {n} (full detail)</a>' for n in names)
+    st.markdown(f'<div style="font-size:.75rem;margin-bottom:8px">Source: {parts}</div>',
+               unsafe_allow_html=True)
+
 def lbl(text):
     return (f"<div style='background:{NAVY};padding:5px 13px;border-radius:5px;"
             f"margin-bottom:8px'><span style='font-size:.78rem;font-weight:500;"
@@ -561,6 +583,178 @@ def _cot_style_z(v):
         r, g, b = 250, 150 + int((v+3)/3*85), 120 + int((v+3)/3*60)
     return f"background-color:rgb({r},{g},{b});color:#1a1a2e"
 
+# ── COT Recap — verbatim port of cot_app.py's _build_recap_df + _recap_html
+#    (Disagg branch only, since this project only ingests the Disagg report) ──
+_RECAP_GROUP_BG = {
+    "Gross Positions": "#d1d5db", "NET": "#bae6fd", "SP": "#fed7aa",
+    "MM+O+NR": "#a7f3d0", "OI": "#e5e7eb", "Rollex Px": "#fef3c7",
+}
+_RECAP_GROUP_TEXT = {}
+_RECAP_COL_SUBSEP = {
+    ("Gross Positions", "Non-Rep Long"), ("Gross Positions", "Swap Long"),
+    ("Gross Positions", "Comm Long"), ("MM+O+NR", "Long"),
+}
+_COLUMN_TOOLTIPS = {
+    ("MM+O+NR", "Long"): "MM Long + Other Long + Non-Rep Long",
+    ("MM+O+NR", "Short"): "MM Short + Other Short + Non-Rep Short",
+    ("NET", "MM+O+NR"): "MM Net + Other Net + Non-Rep Net",
+    ("NET", "Rest"): "Other Net + Non-Rep Net",
+    ("NET", "MM"): "Managed Money Net",
+    ("NET", "Comm"): "Producer/Commercial Net",
+}
+_RECAP_CSS = """
+<style>
+.rtbl{border-collapse:collapse;font-size:.67rem;width:100%;font-family:-apple-system,sans-serif}
+.rtbl th,.rtbl td{border:1px solid #e5e7eb;padding:2px 4px;text-align:center}
+.rtbl td{white-space:nowrap}
+.rtbl .grp{text-align:center;font-weight:700;font-size:.64rem;letter-spacing:.02em;white-space:normal;max-width:60px}
+.rtbl .idx{text-align:left;font-weight:600;color:#374151;background:#f9fafb;min-width:52px;white-space:nowrap}
+.rtbl .sub{background:#f9fafb;font-size:.60rem;color:#555;font-weight:600;text-align:center;white-space:normal;max-width:48px;line-height:1.25}
+.rtbl tbody tr:hover td{background:#f0f9ff!important}
+.rpos{color:#16a34a}.rneg{color:#dc2626}
+.rtbl .gsep{box-shadow:inset 3px 0 0 #6b7280}
+.rtbl .gsub{box-shadow:inset 1.5px 0 0 #b8c0cc}
+</style>
+"""
+
+def _recap_html(df, signed=False, change_table=False, scroll=False, signed_groups=None,
+                pct_groups=None, pct_subcols=None, signed_rows=None, z_rows=None, max_height=None):
+    if df.empty: return ""
+    cols = list(df.columns)
+    groups, prev = [], None
+    for c in cols:
+        g = c[0]
+        if g == prev: groups[-1][1] += 1
+        else: groups.append([g, 1]); prev = g
+    col_sep = []
+    ci = 0
+    for g, span in groups:
+        for j in range(span):
+            c = cols[ci + j]
+            if j == 0: col_sep.append("gsep")
+            elif c in _RECAP_COL_SUBSEP: col_sep.append("gsub")
+            else: col_sep.append("")
+        ci += span
+    h1 = '<tr><th class="idx sub"></th>'
+    for g, span in groups:
+        bg = _RECAP_GROUP_BG.get(g, "#f9fafb")
+        fg = _RECAP_GROUP_TEXT.get(g, "#111827")
+        h1 += f'<th colspan="{span}" class="grp" style="background:{bg};color:{fg};box-shadow:inset 3px 0 0 #6b7280">{g}</th>'
+    h1 += '</tr>'
+    h2 = '<tr><th class="idx sub"></th>'
+    for i, c in enumerate(cols):
+        g = c[0]
+        sep_cls = col_sep[i]
+        tip = _COLUMN_TOOLTIPS.get(c)
+        label = f'{c[1]} ⓘ' if tip else c[1]
+        fsz = ";font-size:.62rem" if len(c[1]) > 9 else ""
+        cls_str = f"sub {sep_cls}".strip()
+        if g in _RECAP_GROUP_TEXT:
+            bg = _RECAP_GROUP_BG.get(g, "#f9fafb"); fg = _RECAP_GROUP_TEXT[g]
+            h2 += f'<th class="{cls_str}" style="background:{bg};color:{fg}{fsz}" title="{tip or ""}">{label}</th>'
+        else:
+            h2 += f'<th class="{cls_str}" style="font-size:.62rem" title="{tip or ""}">{label}</th>'
+    h2 += '</tr>'
+    body = ""
+    for idx, row in df.iterrows():
+        body += f'<tr><td class="idx">{idx}</td>'
+        for i, c in enumerate(cols):
+            sep_cls = col_sep[i]
+            v = row[c]
+            if pd.isna(v): body += f'<td class="{sep_cls}">—</td>'; continue
+            is_z_row = z_rows and idx in z_rows
+            use_signed = (signed or change_table or (signed_rows and idx in signed_rows)
+                         or (signed_groups and isinstance(c, tuple) and c[0] in signed_groups))
+            use_pct = ((pct_groups and isinstance(c, tuple) and c[0] in pct_groups) or
+                      (pct_subcols and isinstance(c, tuple) and c in pct_subcols))
+            fmt = ".2f" if is_z_row else ".1f"
+            if use_signed:
+                txt = f"{v:+{fmt}}"; cls = "rpos" if v > 0 else ("rneg" if v < 0 else "")
+            elif use_pct:
+                txt = f"{v:.1f}%"; cls = ""
+            else:
+                txt = f"{v:{fmt}}"; cls = ""
+            full_cls = f"{cls} {sep_cls}".strip()
+            body += f'<td class="{full_cls}">{txt}</td>'
+        body += '</tr>'
+    scroll_style = f"overflow-x:auto;overflow-y:auto;max-height:{max_height}px;" if max_height is not None \
+        else ("overflow-x:auto;overflow-y:auto;max-height:420px;" if scroll else "overflow-x:auto;")
+    return (f'{_RECAP_CSS}<div style="{scroll_style}margin-bottom:6px">'
+            f'<table class="rtbl"><thead>{h1}{h2}</thead><tbody>{body}</tbody></table></div>')
+
+def _build_recap_df(d):
+    """Disagg-only version of cot_app.py's _build_recap_df."""
+    d = d.sort_values("Date", ascending=True).reset_index(drop=True)
+    if d.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    def gc(name):
+        return d[name].astype(float) if name in d.columns else pd.Series(0.0, index=d.index)
+    cols = {}
+    for src, dst in [("MM Long","MM Long"),("MM Short","MM Short"),("Other Long","Other Long"),
+                     ("Other Short","Other Short"),("Non Rep Long","Non-Rep Long"),
+                     ("Non Rep Short","Non-Rep Short"),("Swap Long","Swap Long"),
+                     ("Swap Short","Swap Short"),("Producer Long","Comm Long"),
+                     ("Producer Short","Comm Short")]:
+        if src in d.columns: cols[("Gross Positions", dst)] = gc(src) / 1000
+    cols[("MM+O+NR", "Long")]  = (gc("MM Long")  + gc("Other Long")  + gc("Non Rep Long"))  / 1000
+    cols[("MM+O+NR", "Short")] = (gc("MM Short") + gc("Other Short") + gc("Non Rep Short")) / 1000
+    cols[("NET", "MM")]      = gc("MM Net")   / 1000
+    cols[("NET", "Rest")]    = (gc("Other Net") + gc("Non Rep Net")) / 1000
+    cols[("NET", "MM+O+NR")] = (gc("MM Net") + gc("Other Net") + gc("Non Rep Net")) / 1000
+    cols[("NET", "Swap")]    = gc("Swap Net")  / 1000
+    cols[("NET", "Comm")]    = gc("Comm Net")  / 1000
+    for src, dst in [("MM Spread","MM Spread"),("Other Spread","Other Spread"),("Swap Spread","Swap Spread")]:
+        if src in d.columns: cols[("SP", dst)] = gc(src) / 1000
+    cols[("OI", "Total OI")] = gc("Total OI") / 1000
+    cols[("Rollex Px", "Level")] = gc("Px")
+
+    body = pd.DataFrame(cols)
+    body.index = pd.to_datetime(d["Date"])
+    body = body.iloc[::-1]
+
+    row_1w, row_4w = {}, {}
+    for c in body.columns:
+        if len(body) >= 2: row_1w[c] = body.iloc[0][c] - body.iloc[1][c]
+        if len(body) >= 5: row_4w[c] = body.iloc[0][c] - body.iloc[4][c]
+    px_lvl = body[("Rollex Px", "Level")]
+    body[("Rollex Px", "Δ% 1w")] = px_lvl.pct_change(-1) * 100
+
+    row_z, row_avg, row_min, row_max = {}, {}, {}, {}
+    for c in body.columns:
+        series = body[c].replace([np.inf, -np.inf], np.nan).dropna()
+        if len(series) >= 4:
+            mu, sigma = series.mean(), series.std()
+            row_z[c] = (series.iloc[0] - mu) / sigma if sigma > 0 else 0.0
+            row_avg[c], row_min[c], row_max[c] = mu, series.min(), series.max()
+
+    summary = pd.DataFrame([row_1w, row_4w, row_z, row_avg, row_min, row_max],
+                           index=["Δ 1w", "Δ 1m", "Z-Score", "Avg", "Min", "Max"], columns=body.columns)
+    summary[("Rollex Px", "Δ% 1w")] = np.nan
+    if len(px_lvl) >= 2 and px_lvl.iloc[1] != 0:
+        summary.loc["Δ 1w", ("Rollex Px", "Δ% 1w")] = (px_lvl.iloc[0] / px_lvl.iloc[1] - 1) * 100
+    if len(px_lvl) >= 5 and px_lvl.iloc[4] != 0:
+        summary.loc["Δ 1m", ("Rollex Px", "Δ% 1w")] = (px_lvl.iloc[0] / px_lvl.iloc[4] - 1) * 100
+    body.index = [f"{dt.day}-{dt.strftime('%b-%y')}" for dt in body.index]
+    return summary, body
+
+# ── COT Recap Charts — verbatim port of cot_app.py's render_recap_charts
+#    (Disagg branch, 12-panel grid; the "Roll Yield vs Positioning" scatter
+#    section at the bottom of the source function was left out) ──────────────
+C_LONG, C_SHORT, C_NET = "#16a34a", "#dc2626", "#1a56db"
+_BASE = dict(template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="-apple-system,BlinkMacSystemFont,'Helvetica Neue',sans-serif",
+                      color="#1a1a1a", size=11))
+_PT_DARK_GREEN, _PT_LIGHT_GREEN = "#1a6b1a", "#7dce7d"
+_PT_DARK_RED, _PT_LIGHT_RED     = "#8b0000", "#f4a0a0"
+_PT_AMBER, _PT_BLACK, _PT_NAVY  = "#e8a020", "#1d1d1f", "#0a2463"
+CONTRACT_SIZE = {"KC": 37500, "RC": 10}
+CONTRACT_UNIT = {"KC": "lbs", "RC": "MT"}
+
+def _pt_label(text):
+    return (f"<div style='background:{_PT_NAVY};padding:5px 13px;border-radius:5px;"
+            f"margin-bottom:8px'><span style='font-size:.78rem;font-weight:500;"
+            f"letter-spacing:.07em;text-transform:uppercase;color:#dde4f0'>{text}</span></div>")
+
 # ── Currency (Coffee only — Cocoa branch of the source app not needed here) ────
 CCY_COUNTRIES_ARABICA = ["Brazil", "Colombia", "Honduras", "Ethiopia", "Peru"]
 CCY_COUNTRIES_ROBUSTA = ["Vietnam", "Brazil", "Indonesia", "Uganda", "India"]
@@ -603,6 +797,7 @@ tab_flat, tab_spread, tab_arb, tab_vol, tab_risk, tab_pos, tab_ccy = st.tabs(
 #        + Futures dashboard's self-contained "All Contracts Rolling Volume"
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_flat:
+    source_link("Rollex", "Futures OI")
     f_grid, f_price, f_pv, f_idx, f_dist, f_vol, f_flow, f_seas, f_corr = st.tabs(
         ["Comprehensive Grid", "Price & OI", "Price & Vol", "Indexed Performance",
          "Return Distribution", "Rolling Volume", "OI & Volume Flow", "Seasonality",
@@ -665,13 +860,27 @@ with tab_flat:
             st.plotly_chart(fig_px, use_container_width=True, key=f"pv_{leg}")
 
     with f_idx:
-        st.markdown(lbl(f"{commodity} — Indexed Performance (Base=100)"), unsafe_allow_html=True)
-        fig_idx = base_fig(height=440, yaxis_title="Indexed (Base=100)")
-        for leg in legs:
-            rx = load_rollex(cfg["rollex_codes"][leg]).set_index("Date").sort_index()
-            indexed = rx["Close"] / rx["Close"].iloc[0] * 100
-            fig_idx.add_trace(go.Scatter(x=indexed.index, y=indexed, name=leg,
-                                         line=dict(color=leg_colors[leg], width=1.8)))
+        st.markdown(lbl("Indexed Performance (Base=100) — All Commodities"), unsafe_allow_html=True)
+        idx_all = {}
+        for c in ALL_ROLLEX_COMMS:
+            try:
+                idx_all[c] = load_rollex(c).set_index("Date").sort_index()["Close"]
+            except FileNotFoundError:
+                continue
+        idx_min = min(s.index.min() for s in idx_all.values()).date()
+        idx_max = max(s.index.max() for s in idx_all.values()).date()
+        idx_range = st.slider("Date range", min_value=idx_min, max_value=idx_max,
+                              value=(idx_min, idx_max), key="idx_daterange")
+
+        fig_idx = base_fig(height=460, yaxis_title="Indexed (Base=100)")
+        for c, s in idx_all.items():
+            s = s[(s.index.date >= idx_range[0]) & (s.index.date <= idx_range[1])]
+            if s.empty:
+                continue
+            indexed = s / s.iloc[0] * 100
+            fig_idx.add_trace(go.Scatter(x=indexed.index, y=indexed, name=c,
+                                         line=dict(color=leg_colors.get(c, None), width=1.8)
+                                         if c in leg_colors else dict(width=1.4)))
         fig_idx.add_hline(y=100, line_color="#cccccc", line_width=1)
         st.plotly_chart(fig_idx, use_container_width=True)
 
@@ -904,6 +1113,7 @@ with tab_flat:
 # SPREAD — verified ports of the Roll Yield dashboard
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_spread:
+    source_link("Roll Yield")
     s_yield, s_rank, s_curve, s_heat = st.tabs(
         ["Yield & Curve", "Ranking & Percentile", "Forward Curves", "Roll Yield Heatmap"]
     )
@@ -1030,10 +1240,8 @@ with tab_spread:
 # ARB — full verified port of the Arb dashboard's KC/RC spread section
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_arb:
+    source_link("Arb")
     if commodity == "Coffee":
-        a_spread, a_z, a_legs, a_scatter, a_ratio = st.tabs(
-            ["Spread", "Z-Score", "Individual Legs", "Return Scatter", "Ratio"]
-        )
         kc = load_arb_front("KC")["px1"]
         rc = load_arb_front("RC")["px1"]
         l1 = kc * KC_FACTOR   # KC in $/MT
@@ -1043,80 +1251,75 @@ with tab_arb:
         mu, sig = spread.rolling(zscore_win).mean(), spread.rolling(zscore_win).std()
         z = (spread - mu) / sig
 
-        with a_spread:
-            st.markdown(lbl("Arabica Premium over Robusta ($/MT)"), unsafe_allow_html=True)
-            fig_sp = base_fig(height=440, yaxis_title="$/MT")
-            fig_sp.add_trace(go.Scatter(x=spread.index, y=mu + 2*sig, name="+2σ", line=dict(color=RED, width=1, dash="dot")))
-            fig_sp.add_trace(go.Scatter(x=spread.index, y=mu + sig, name="+1σ", line=dict(color=AMBER, width=1, dash="dash")))
-            fig_sp.add_trace(go.Scatter(x=spread.index, y=mu, name="Mean", line=dict(color=GREY, width=1.5)))
-            fig_sp.add_trace(go.Scatter(x=spread.index, y=mu - sig, name="-1σ", line=dict(color=AMBER, width=1, dash="dash")))
-            fig_sp.add_trace(go.Scatter(x=spread.index, y=mu - 2*sig, name="-2σ", line=dict(color=GREEN, width=1, dash="dot")))
-            fig_sp.add_trace(go.Scatter(x=spread.index, y=spread, name="Spread", line=dict(color=NAVY, width=2)))
-            st.plotly_chart(fig_sp, use_container_width=True)
+        st.markdown(lbl("Arabica Premium over Robusta ($/MT)"), unsafe_allow_html=True)
+        fig_sp = base_fig(height=440, yaxis_title="$/MT")
+        fig_sp.add_trace(go.Scatter(x=spread.index, y=mu + 2*sig, name="+2σ", line=dict(color=RED, width=1, dash="dot")))
+        fig_sp.add_trace(go.Scatter(x=spread.index, y=mu + sig, name="+1σ", line=dict(color=AMBER, width=1, dash="dash")))
+        fig_sp.add_trace(go.Scatter(x=spread.index, y=mu, name="Mean", line=dict(color=GREY, width=1.5)))
+        fig_sp.add_trace(go.Scatter(x=spread.index, y=mu - sig, name="-1σ", line=dict(color=AMBER, width=1, dash="dash")))
+        fig_sp.add_trace(go.Scatter(x=spread.index, y=mu - 2*sig, name="-2σ", line=dict(color=GREEN, width=1, dash="dot")))
+        fig_sp.add_trace(go.Scatter(x=spread.index, y=spread, name="Spread", line=dict(color=NAVY, width=2)))
+        st.plotly_chart(fig_sp, use_container_width=True)
 
-        with a_z:
-            st.markdown(lbl(f"Spread Z-Score ({zscore_win}d rolling)"), unsafe_allow_html=True)
-            fig_z = base_fig(height=380, yaxis_title="Z-Score")
-            fig_z.add_trace(go.Scatter(x=z.index, y=z, line=dict(color=NAVY, width=1.5), name="Z-Score"))
-            fig_z.add_hline(y=0, line_color=GREY, line_width=1)
-            fig_z.update_layout(yaxis=dict(range=[-4, 4], gridcolor="#f0f0f0"))
-            st.plotly_chart(fig_z, use_container_width=True)
+        st.markdown(lbl(f"Spread Z-Score ({zscore_win}d rolling)"), unsafe_allow_html=True)
+        fig_z = base_fig(height=380, yaxis_title="Z-Score")
+        fig_z.add_trace(go.Scatter(x=z.index, y=z, line=dict(color=NAVY, width=1.5), name="Z-Score"))
+        fig_z.add_hline(y=0, line_color=GREY, line_width=1)
+        fig_z.update_layout(yaxis=dict(range=[-4, 4], gridcolor="#f0f0f0"))
+        st.plotly_chart(fig_z, use_container_width=True)
 
-        with a_legs:
-            st.markdown(lbl("Individual Legs ($/MT)"), unsafe_allow_html=True)
-            fig_legs = base_fig(height=420, yaxis_title="$/MT")
-            fig_legs.add_trace(go.Scatter(x=l1.index, y=l1, name="KC ($/MT)", line=dict(color=NAVY, width=1.5)))
-            fig_legs.add_trace(go.Scatter(x=l2.index, y=l2, name="RC ($/MT)", line=dict(color=AMBER, width=1.5)))
-            st.plotly_chart(fig_legs, use_container_width=True)
+        st.markdown(lbl("Individual Legs ($/MT)"), unsafe_allow_html=True)
+        fig_legs = base_fig(height=420, yaxis_title="$/MT")
+        fig_legs.add_trace(go.Scatter(x=l1.index, y=l1, name="KC ($/MT)", line=dict(color=NAVY, width=1.5)))
+        fig_legs.add_trace(go.Scatter(x=l2.index, y=l2, name="RC ($/MT)", line=dict(color=AMBER, width=1.5)))
+        st.plotly_chart(fig_legs, use_container_width=True)
 
-        with a_scatter:
-            st.markdown(lbl("Daily Return Scatter"), unsafe_allow_html=True)
-            dl1, dl2 = l1.diff().dropna(), l2.diff().dropna()
-            scat = pd.concat([dl1.rename("leg1"), dl2.rename("leg2")], axis=1).dropna()
-            if len(scat) < 10:
-                st.info("Not enough data.")
-            else:
-                coeffs = np.polyfit(scat["leg1"], scat["leg2"], 1)
-                x_line = np.linspace(scat["leg1"].min(), scat["leg1"].max(), 200)
-                y_line = coeffs[0] * x_line + coeffs[1]
-                r2 = scat["leg1"].corr(scat["leg2"]) ** 2
-                cutoff = 60
-                old_mask = scat.index < scat.index[-min(cutoff, len(scat))]
-                recent, history = scat[~old_mask], scat[old_mask]
+        st.markdown(lbl("Daily Return Scatter"), unsafe_allow_html=True)
+        dl1, dl2 = l1.diff().dropna(), l2.diff().dropna()
+        scat = pd.concat([dl1.rename("leg1"), dl2.rename("leg2")], axis=1).dropna()
+        if len(scat) < 10:
+            st.info("Not enough data.")
+        else:
+            coeffs = np.polyfit(scat["leg1"], scat["leg2"], 1)
+            x_line = np.linspace(scat["leg1"].min(), scat["leg1"].max(), 200)
+            y_line = coeffs[0] * x_line + coeffs[1]
+            r2 = scat["leg1"].corr(scat["leg2"]) ** 2
+            cutoff = 60
+            old_mask = scat.index < scat.index[-min(cutoff, len(scat))]
+            recent, history = scat[~old_mask], scat[old_mask]
 
-                fig_scat = go.Figure()
-                fig_scat.add_trace(go.Scatter(x=history["leg1"], y=history["leg2"], mode="markers", name="History",
-                                              marker=dict(color=GREY, size=4, opacity=0.45)))
-                fig_scat.add_trace(go.Scatter(x=recent["leg1"], y=recent["leg2"], mode="markers",
-                                              name=f"Last {min(cutoff, len(scat))}d",
-                                              marker=dict(color=NAVY, size=6, opacity=0.85)))
-                fig_scat.add_trace(go.Scatter(x=x_line, y=y_line, mode="lines", name="Regression",
-                                              line=dict(color=RED, width=1.5, dash="dash")))
-                callout_n = 5
-                latest = scat.iloc[-callout_n:]
-                fig_scat.add_trace(go.Scatter(x=latest["leg1"], y=latest["leg2"], mode="markers",
-                                              name=f"Last {callout_n} sessions",
-                                              marker=dict(color=RED, size=10, symbol="circle-open", line=dict(color=RED, width=2))))
-                fig_scat.add_hline(y=0, line_color="#f0f0f0", line_width=1)
-                fig_scat.add_vline(x=0, line_color="#f0f0f0", line_width=1)
-                fig_scat.update_layout(height=440, title=dict(text=f"R²={r2:.2f}", font=dict(size=11)),
-                                       xaxis=dict(title="Δ KC ($/MT)", gridcolor="#f0f0f0"),
-                                       yaxis=dict(title="Δ RC ($/MT)", gridcolor="#f0f0f0"),
-                                       legend=dict(orientation="h", y=1.08, font=dict(size=8)),
-                                       margin=dict(t=30, b=10, l=4, r=4), **_D)
-                st.plotly_chart(fig_scat, use_container_width=True)
+            fig_scat = go.Figure()
+            fig_scat.add_trace(go.Scatter(x=history["leg1"], y=history["leg2"], mode="markers", name="History",
+                                          marker=dict(color=GREY, size=4, opacity=0.45)))
+            fig_scat.add_trace(go.Scatter(x=recent["leg1"], y=recent["leg2"], mode="markers",
+                                          name=f"Last {min(cutoff, len(scat))}d",
+                                          marker=dict(color=NAVY, size=6, opacity=0.85)))
+            fig_scat.add_trace(go.Scatter(x=x_line, y=y_line, mode="lines", name="Regression",
+                                          line=dict(color=RED, width=1.5, dash="dash")))
+            callout_n = 5
+            latest = scat.iloc[-callout_n:]
+            fig_scat.add_trace(go.Scatter(x=latest["leg1"], y=latest["leg2"], mode="markers",
+                                          name=f"Last {callout_n} sessions",
+                                          marker=dict(color=RED, size=10, symbol="circle-open", line=dict(color=RED, width=2))))
+            fig_scat.add_hline(y=0, line_color="#f0f0f0", line_width=1)
+            fig_scat.add_vline(x=0, line_color="#f0f0f0", line_width=1)
+            fig_scat.update_layout(height=440, title=dict(text=f"R²={r2:.2f}", font=dict(size=11)),
+                                   xaxis=dict(title="Δ KC ($/MT)", gridcolor="#f0f0f0"),
+                                   yaxis=dict(title="Δ RC ($/MT)", gridcolor="#f0f0f0"),
+                                   legend=dict(orientation="h", y=1.08, font=dict(size=8)),
+                                   margin=dict(t=30, b=10, l=4, r=4), **_D)
+            st.plotly_chart(fig_scat, use_container_width=True)
 
-        with a_ratio:
-            st.markdown(lbl("KC/RC Price Ratio (Arabica/Robusta)"), unsafe_allow_html=True)
-            st.caption("Roasters blend the two; extreme ratios historically mean-revert as substitution economics kick in.")
-            ratio = l1 / l2
-            mu_r, sig_r = ratio.rolling(zscore_win).mean(), ratio.rolling(zscore_win).std()
-            fig_ratio = base_fig(height=420, yaxis_title="KC/RC")
-            fig_ratio.add_trace(go.Scatter(x=ratio.index, y=mu_r + sig_r, name="+1σ", line=dict(color=AMBER, width=1, dash="dash")))
-            fig_ratio.add_trace(go.Scatter(x=ratio.index, y=mu_r - sig_r, name="-1σ", line=dict(color=AMBER, width=1, dash="dash")))
-            fig_ratio.add_trace(go.Scatter(x=ratio.index, y=mu_r, name="Mean", line=dict(color=GREY, width=1)))
-            fig_ratio.add_trace(go.Scatter(x=ratio.index, y=ratio, name="KC/RC Ratio", line=dict(color=NAVY, width=2)))
-            st.plotly_chart(fig_ratio, use_container_width=True)
+        st.markdown(lbl("KC/RC Price Ratio (Arabica/Robusta)"), unsafe_allow_html=True)
+        st.caption("Roasters blend the two; extreme ratios historically mean-revert as substitution economics kick in.")
+        ratio = l1 / l2
+        mu_r, sig_r = ratio.rolling(zscore_win).mean(), ratio.rolling(zscore_win).std()
+        fig_ratio = base_fig(height=420, yaxis_title="KC/RC")
+        fig_ratio.add_trace(go.Scatter(x=ratio.index, y=mu_r + sig_r, name="+1σ", line=dict(color=AMBER, width=1, dash="dash")))
+        fig_ratio.add_trace(go.Scatter(x=ratio.index, y=mu_r - sig_r, name="-1σ", line=dict(color=AMBER, width=1, dash="dash")))
+        fig_ratio.add_trace(go.Scatter(x=ratio.index, y=mu_r, name="Mean", line=dict(color=GREY, width=1)))
+        fig_ratio.add_trace(go.Scatter(x=ratio.index, y=ratio, name="KC/RC Ratio", line=dict(color=NAVY, width=2)))
+        st.plotly_chart(fig_ratio, use_container_width=True)
     else:
         st.info("No Arb pair mapped for this commodity yet.")
 
@@ -1124,6 +1327,7 @@ with tab_arb:
 # VOLATILITY — unchanged: simplified stand-in, explicitly labeled as such
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_vol:
+    source_link("Options", "Rollex")
     v_ivrv, v_bfy, v_rvseas = st.tabs(
         ["IV vs RV (Simplified)", "OI Change + Volume Butterfly", "RV Seasonality"]
     )
@@ -1179,9 +1383,14 @@ with tab_vol:
             st.info(f"No options data available for {leg_pick_b}.")
         else:
             all_dates = sorted(odf["date"].dt.date.unique())
-            days_back = st.slider("Days back for Old Date", 1, min(60, len(all_dates)-1), 5, key="bfy_daysback")
-            new_date = all_dates[-1]
-            old_date = all_dates[-1 - days_back]
+            default_old = all_dates[-1 - min(5, len(all_dates)-1)]
+            c1, c2 = st.columns(2)
+            with c1:
+                old_date = st.select_slider("Old Date", options=all_dates, value=default_old, key="bfy_old_date")
+            with c2:
+                new_date = st.select_slider("New Date", options=all_dates, value=all_dates[-1], key="bfy_new_date")
+            if old_date > new_date:
+                old_date, new_date = new_date, old_date
 
             front = load_front_price(cfg["futures_codes"][leg_pick_b])
             price = float(front["settlement"].dropna().iloc[-1])
@@ -1264,6 +1473,7 @@ with tab_vol:
 # RISK — verified ports of the VaR project's Parametric VaR tab
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_risk:
+    source_link("VaR")
     r_var, r_pct, r_heat = st.tabs(["Parametric VaR", "Vol Percentile", "VaR Heatmap"])
 
     window_label = st.radio("VaR Window (applies to this whole tab)", ["20D", "60D", "120D"],
@@ -1334,12 +1544,44 @@ with tab_risk:
 # POSITIONING — verified port of the COT_ALL spec_distribution_app's two tabs
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_pos:
+    source_link("COT Comprehensive", "COT Distribution")
     if commodity == "Coffee":
-        p_recap, p_matrix, p_dist = st.tabs(["Recap", "Z-Score Matrix", "Distribution"])
+        p_recap, p_recap_ch, p_pain, p_matrix, p_dist = st.tabs(
+            ["Recap", "Recap (Charts)", "Pain Trade Monitor", "Z-Score Matrix", "Distribution"]
+        )
         cot = load_cot_disagg()
 
         with p_recap:
             st.markdown(lbl(f"{commodity} — COT Recap"), unsafe_allow_html=True)
+            st.caption("Verbatim port of the COT dashboard's Recap tab (Disagg branch only — this "
+                       "project doesn't ingest the CIT report). The deeper expanders from the source "
+                       "(OI by category, Nominal Exposure, # of Traders, k lots/Trader) aren't "
+                       "included here — this covers the three headline tables.")
+            leg_pick_recap0 = st.selectbox("Leg", legs, key="recap_leg0")
+            cot_code_r0 = "RC" if leg_pick_recap0 == "LRC" else leg_pick_recap0
+            d_recap = cot[(cot["Commodity"] == cot_code_r0) & (cot["Crop"] == "All")]
+            if d_recap.empty:
+                st.warning("No data for the selected leg.")
+            else:
+                summary, body = _build_recap_df(d_recap)
+                if body.empty:
+                    st.warning("No data.")
+                else:
+                    view = body.iloc[:20]
+                    _PX_PCT = {("Rollex Px", "Δ% 1w")}
+                    with st.expander("Change summary  ·  k lots", expanded=True):
+                        st.markdown(_recap_html(summary, signed_rows={"Δ 1w", "Δ 1m", "Z-Score"},
+                                                z_rows={"Z-Score"}, pct_subcols=_PX_PCT, max_height=148),
+                                   unsafe_allow_html=True)
+                    with st.expander("Historical positions  ·  k lots", expanded=True):
+                        st.markdown(_recap_html(view, scroll=True, pct_subcols=_PX_PCT), unsafe_allow_html=True)
+                    with st.expander("Weekly change  ·  k lots", expanded=True):
+                        chg = view.diff(-1)
+                        st.markdown(_recap_html(chg, signed=True, change_table=True, scroll=True,
+                                                pct_subcols=_PX_PCT), unsafe_allow_html=True)
+
+            st.markdown("<hr>", unsafe_allow_html=True)
+            st.markdown(lbl(f"{commodity} — Quick Recap, All Categories"), unsafe_allow_html=True)
             st.caption("Net position, week-over-week change, and 3-year z-score for every "
                        "category, KC and LRC side by side. Disaggregated (Futures-only), same "
                        "basis as the Z-Score Matrix.")
@@ -1381,6 +1623,149 @@ with tab_pos:
                 st.plotly_chart(fig_net, use_container_width=True)
             else:
                 st.info("No data for this leg/category.")
+
+        with p_recap_ch:
+            st.markdown(lbl(f"{commodity} — COT Recap Charts"), unsafe_allow_html=True)
+            st.caption("Verbatim port of the COT dashboard's Recap (Charts) tab, Disagg branch "
+                       "(12-panel grid). The 'Roll Yield vs Positioning' scatter section at the "
+                       "bottom of the source tab wasn't ported.")
+            leg_pick_rc = st.selectbox("Leg", legs, key="recap_ch_leg")
+            cot_code_rc = "RC" if leg_pick_rc == "LRC" else leg_pick_rc
+            d_rc = cot[(cot["Commodity"] == cot_code_rc) & (cot["Crop"] == "All")].sort_values("Date").reset_index(drop=True)
+            if d_rc.empty:
+                st.warning("No data for the selected leg.")
+            else:
+                dates_rc = pd.to_datetime(d_rc["Date"])
+                def gc_rc(name):
+                    return d_rc[name].astype(float) if name in d_rc.columns else pd.Series(np.nan, index=d_rc.index)
+                size = CONTRACT_SIZE.get(cot_code_rc, 1)
+                unit = CONTRACT_UNIT.get(cot_code_rc, "MT")
+                px_rc = gc_rc("Px")
+                mult = (px_rc * size / 100 / 1_000_000) if unit == "lbs" else (px_rc * size / 1_000_000)
+                oi_rc = gc_rc("Total OI").replace(0, np.nan)
+
+                def _rc_line(title, series_dict, clrs=None):
+                    dflt = [C_LONG, C_SHORT, C_NET, "#f59e0b", "#7c3aed"]
+                    clrs = clrs or dflt
+                    fig = go.Figure()
+                    fig.update_layout(**_BASE, title=dict(text=f"{cot_code_rc} — {title}", font=dict(size=10, color="#374151")),
+                                      height=260, margin=dict(l=40, r=8, t=36, b=48), showlegend=True,
+                                      legend=dict(orientation="h", y=-0.28, font=dict(size=9)),
+                                      xaxis=dict(showgrid=False, tickangle=-35, nticks=20),
+                                      yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.05)"))
+                    for i, (name, y) in enumerate(series_dict.items()):
+                        fig.add_trace(go.Scatter(x=dates_rc, y=y, name=name, line=dict(color=clrs[i % len(clrs)], width=1.5)))
+                    return fig
+
+                mm_net, swap_net = gc_rc("MM Net"), gc_rc("Swap Net")
+                rc_cols = st.columns(3)
+                panels = [
+                    ("MM Gross k lots", {"MM Long": gc_rc("MM Long")/1000, "MM Short": gc_rc("MM Short")/1000}, [C_LONG, C_SHORT]),
+                    ("MM Gross % of OI", {"MM Long %": gc_rc("MM Long")/oi_rc*100, "MM Short %": gc_rc("MM Short")/oi_rc*100}, [C_LONG, C_SHORT]),
+                    (f"MM Nominal M USD", {"MM Long": gc_rc("MM Long")*mult, "MM Short": gc_rc("MM Short")*mult}, [C_LONG, C_SHORT]),
+                    ("Commercial Gross k lots", {"Prod Long": gc_rc("Producer Long")/1000, "Prod Short": gc_rc("Producer Short")/1000}, [C_LONG, C_SHORT]),
+                    ("Commercial Gross % of OI", {"Prod Long %": gc_rc("Producer Long")/oi_rc*100, "Prod Short %": gc_rc("Producer Short")/oi_rc*100}, [C_LONG, C_SHORT]),
+                    (f"Commercial Nominal M USD", {"Prod Long": gc_rc("Producer Long")*mult, "Prod Short": gc_rc("Producer Short")*mult}, [C_LONG, C_SHORT]),
+                    ("Other Gross k lots", {"Other Long": gc_rc("Other Long")/1000, "Other Short": gc_rc("Other Short")/1000}, [C_LONG, C_SHORT]),
+                    ("Other Gross % of OI", {"Other Long %": gc_rc("Other Long")/oi_rc*100, "Other Short %": gc_rc("Other Short")/oi_rc*100}, [C_LONG, C_SHORT]),
+                    (f"Other Nominal M USD", {"Other Long": gc_rc("Other Long")*mult, "Other Short": gc_rc("Other Short")*mult}, [C_LONG, C_SHORT]),
+                    ("MM Net & Swap Net & Other Net k lots", {"MM Net": mm_net/1000, "Swap Net": swap_net/1000, "Other Net": gc_rc("Other Net")/1000}, [C_NET, C_LONG, "#f59e0b"]),
+                    ("# of Traders", {"MM Long": gc_rc("Traders MM Long"), "MM Short": gc_rc("Traders MM Short"),
+                                      "Other Long": gc_rc("Traders Other Long"), "Other Short": gc_rc("Traders Other Short")},
+                     [C_LONG, C_SHORT, "#f59e0b", "#7c3aed"]),
+                    ("Other Spread k lots", {"Other Spread": gc_rc("Other Spread")/1000}, ["#f59e0b"]),
+                ]
+                for i, (title, series, clrs) in enumerate(panels):
+                    with rc_cols[i % 3]:
+                        st.plotly_chart(_rc_line(title, series, clrs), use_container_width=True, key=f"recap_ch_{i}")
+
+        with p_pain:
+            st.markdown(lbl(f"{commodity} — Pain Trade Monitor (first visual)"), unsafe_allow_html=True)
+            st.caption("Verbatim port of the Pain Trade Monitor's first chart only, as requested — "
+                       "Spec Legs weekly change (Long Add/Liq, Short Add/Cover) vs Rollex price. "
+                       "The source tab has a second visual (Rollex vs COT breakdown scatter) not "
+                       "ported here.")
+            leg_pick_pt = st.selectbox("Leg", legs, key="pain_leg")
+            cot_code_pt = "RC" if leg_pick_pt == "LRC" else leg_pick_pt
+            d_pt = cot[(cot["Commodity"] == cot_code_pt) & (cot["Crop"] == "All")].copy()
+            if d_pt.empty:
+                st.warning("No data for the selected leg.")
+            else:
+                incl = st.radio("Include Other Rept. in spec legs?",
+                                ["Yes — MM + Non Rep + Other Rept.", "No — MM + Non Rep only"],
+                                index=0, horizontal=True, key="pain_incl")
+                use_third = incl.startswith("Yes")
+
+                rx_daily = load_rollex(cfg["rollex_codes"][leg_pick_pt]).rename(columns={"Close": "Rollex"})
+                df_pt = d_pt.sort_values("Date").reset_index(drop=True)
+                df_pt["Rollex"] = pd.to_numeric(df_pt["Px"], errors="coerce")
+                if "Total OI" in df_pt.columns:
+                    oi_cap = pd.to_numeric(df_pt["Total OI"], errors="coerce").clip(lower=1)
+                    for _pc in ["MM Long", "MM Short", "Other Long", "Other Short", "Non Rep Long", "Non Rep Short"]:
+                        if _pc in df_pt.columns:
+                            df_pt[_pc] = pd.to_numeric(df_pt[_pc], errors="coerce").clip(upper=oi_cap)
+
+                if use_third:
+                    gross_long  = (df_pt["MM Long"] + df_pt["Non Rep Long"] + df_pt["Other Long"]) / 1000
+                    gross_short = (df_pt["MM Short"] + df_pt["Non Rep Short"] + df_pt["Other Short"]) / 1000
+                    leg_label = "MM + Non Rep + Other Rept."
+                else:
+                    gross_long  = (df_pt["MM Long"] + df_pt["Non Rep Long"]) / 1000
+                    gross_short = (df_pt["MM Short"] + df_pt["Non Rep Short"]) / 1000
+                    leg_label = "MM + Non Rep"
+
+                long_chg, short_chg = gross_long.diff(), gross_short.diff()
+                df_pt["Long Add"]    =  long_chg.clip(lower=0)
+                df_pt["Long Liq"]    =  long_chg.clip(upper=0)
+                df_pt["Short Add"]   = -short_chg.clip(lower=0)
+                df_pt["Short Cover"] = -short_chg.clip(upper=0)
+
+                nw_opts = {"13w": 13, "26w": 26, "52w": 52}
+                nw_sel = st.radio("Show last", list(nw_opts.keys()), index=0, horizontal=True, key="pain_nw")
+                n_weeks = nw_opts[nw_sel]
+                pt_max = df_pt["Date"].max()
+                dff_pt = df_pt[df_pt["Date"] >= pt_max - pd.Timedelta(weeks=n_weeks)].copy()
+                last_cot_date = dff_pt["Date"].max()
+                last_cot_str = last_cot_date.strftime("%d/%m/%Y") if pd.notna(last_cot_date) else "—"
+                latest_rx_str = rx_daily["Date"].max().strftime("%d/%m/%Y") if not rx_daily.empty else last_cot_str
+
+                st.markdown(_pt_label(f"{cot_code_pt} — Spec Legs Weekly Change ({leg_label}) · Rollex (Right) "
+                                     f"| COT as of {last_cot_str} · Rollex as of {latest_rx_str}"),
+                           unsafe_allow_html=True)
+                fig1 = make_subplots(specs=[[{"secondary_y": True}]])
+                for col, c, name in [("Long Add", _PT_DARK_GREEN, "Long Add"), ("Long Liq", _PT_LIGHT_GREEN, "Long Liq."),
+                                     ("Short Add", _PT_DARK_RED, "Short Add"), ("Short Cover", _PT_LIGHT_RED, "Short Cover")]:
+                    fig1.add_trace(go.Bar(x=dff_pt["Date"], y=dff_pt[col], name=name, marker_color=c, opacity=0.92),
+                                   secondary_y=False)
+                rx_solid = dff_pt.dropna(subset=["Rollex"])
+                fig1.add_trace(go.Scatter(x=rx_solid["Date"], y=rx_solid["Rollex"], name="Rollex (COT period)",
+                                          mode="lines", line=dict(color=_PT_BLACK, width=2)), secondary_y=True)
+                if not rx_solid.empty and not rx_daily.empty:
+                    last_solid = rx_solid.iloc[-1:][["Date", "Rollex"]]
+                    rx_after = rx_daily[rx_daily["Date"] > last_cot_date][["Date", "Rollex"]]
+                    rx_ext = pd.concat([last_solid, rx_after]).sort_values("Date")
+                    if len(rx_ext) > 1:
+                        fig1.add_trace(go.Scatter(x=rx_ext["Date"], y=rx_ext["Rollex"],
+                                                  name=f"Rollex post-COT ({latest_rx_str})", mode="lines",
+                                                  line=dict(color=_PT_AMBER, width=2, dash="dot")), secondary_y=True)
+                        last_pt = rx_ext.iloc[-1]
+                        fig1.add_trace(go.Scatter(x=[last_pt["Date"]], y=[last_pt["Rollex"]], mode="markers+text",
+                                                  marker=dict(color=_PT_AMBER, size=11, symbol="diamond",
+                                                             line=dict(color=_PT_BLACK, width=1)),
+                                                  text=[f"  {last_pt['Rollex']:.1f}"], textposition="middle right",
+                                                  textfont=dict(size=10, color=_PT_AMBER), showlegend=False),
+                                       secondary_y=True)
+                x_left = dff_pt["Date"].min() - pd.Timedelta(days=2)
+                x_right_anchor = rx_daily["Date"].max() if not rx_daily.empty else dff_pt["Date"].max()
+                x_right = x_right_anchor + pd.Timedelta(days=5)
+                fig1.update_layout(barmode="relative", height=420, margin=dict(t=10, b=10, l=4, r=4),
+                                   legend=dict(orientation="h", y=1.06, x=0, font=dict(size=9)),
+                                   xaxis=dict(showgrid=False, tickfont=dict(size=9), range=[x_left, x_right]),
+                                   template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                   font=dict(family="-apple-system,Helvetica Neue,sans-serif", color=_PT_BLACK, size=10))
+                fig1.update_yaxes(title_text="k Contracts", secondary_y=False, showgrid=True, gridcolor="#f0f0f0", tickfont=dict(size=9))
+                fig1.update_yaxes(title_text="Rollex Price", secondary_y=True, showgrid=False, tickfont=dict(size=9))
+                st.plotly_chart(fig1, use_container_width=True)
 
         with p_matrix:
             st.markdown(lbl("COT Z-Score Matrix — All Commodities, Disaggregated (Futures-only)"),
@@ -1467,6 +1852,7 @@ with tab_pos:
 # CURRENCY — verified port of the Currency dashboard's Coffee branch
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_ccy:
+    source_link("Currency")
     if commodity == "Coffee":
         ccy = load_currency()
         min_d, max_d = ccy["Date"].min().date(), ccy["Date"].max().date()
