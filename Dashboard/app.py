@@ -356,6 +356,39 @@ def bfy_butterfly_html(cpiv, ppiv, atm, cfn, month_keys, fmt="{:.0f}", footer=Tr
     return (f'{_BFY_CSS}<div style="overflow-x:auto;overflow-y:auto;max-height:{est_h}px">'
             f'<table class="bft"><thead>{h1}{h2}{h3}</thead>{ft}<tbody>{"".join(body)}</tbody></table></div>')
 
+# ── Rollex seasonality heatmap — verbatim port of ICE_Rollex.py's _simple_heatmap
+#    (Monthly Returns Heatmap + Monthly Realized Vol Heatmap share this) ───────
+RX_RET_CS = [[0.0, "#c0392b"], [0.45, "rgba(255,200,200,0.4)"], [0.5, "#f8f8f8"],
+             [0.55, "rgba(200,235,200,0.4)"], [1.0, "#1a7a1a"]]
+RX_VOL_CS = [[0.0, "#f0f0f0"], [0.01, "#1a7a1a"], [0.5, "#f8f8f8"], [1.0, "#c0392b"]]
+
+def _rx_simple_heatmap(year_pivot, fmt_val, fmt_stat, colorscale, zmin, zmax, zmid, hover_suffix):
+    piv = year_pivot.sort_index(ascending=True).copy()
+    avg_row, std_row = piv.mean(skipna=True), piv.std(skipna=True)
+    icv_row = avg_row / std_row
+    y_labels = [str(y) for y in piv.index] + [""] + ["Avg", "Std", "ICV"]
+    z_all, t_all = [], []
+    for _, row in piv.iterrows():
+        z_all.append([float(v) if pd.notna(v) else None for v in row])
+        t_all.append([fmt_val(v) if pd.notna(v) else "" for v in row])
+    z_all.append([None] * len(MONTHS)); t_all.append([""] * len(MONTHS))
+    for lbl_s, row in zip(["Avg", "Std", "ICV"], [avg_row, std_row, icv_row]):
+        z_all.append([0.0] * len(MONTHS))
+        t_all.append([f"<b>{fmt_stat(lbl_s, v)}</b>" if lbl_s == "ICV" and pd.notna(v)
+                     else (fmt_stat(lbl_s, v) if pd.notna(v) else "") for v in row])
+    fig = go.Figure(go.Heatmap(
+        z=z_all, x=MONTHS, y=y_labels, colorscale=colorscale, zmid=zmid, zmin=zmin, zmax=zmax,
+        text=t_all, texttemplate="%{text}", textfont=dict(size=8.5),
+        hovertemplate="%{y}  %{x}: <b>%{z:.2f}" + hover_suffix + "</b><extra></extra>",
+        showscale=False, xgap=1, ygap=1))
+    fig.update_layout(height=max(300, len(y_labels) * 24 + 80), margin=dict(t=35, b=8, l=50, r=4),
+                      xaxis=dict(tickfont=dict(size=9), side="top", showgrid=False, showticklabels=False),
+                      yaxis=dict(tickfont=dict(size=9), showgrid=False, autorange=True), **_D)
+    for month in MONTHS:
+        fig.add_annotation(x=month, y=1.02, xref="x", yref="paper", text=f"<b>{month}</b>",
+                          showarrow=False, font=dict(size=9, color="#1d1d1f"), align="center")
+    return fig
+
 def year_month_heatmap(df: pd.DataFrame, date_col: str, value_col: str, title: str,
                         colorscale=None, zmid=None, key=None, pct=False):
     d = df.dropna(subset=[value_col]).copy()
@@ -562,9 +595,9 @@ tab_flat, tab_spread, tab_arb, tab_vol, tab_risk, tab_pos, tab_ccy = st.tabs(
 #        + Futures dashboard's self-contained "All Contracts Rolling Volume"
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_flat:
-    f_grid, f_price, f_pv, f_idx, f_dist, f_vol, f_flow = st.tabs(
+    f_grid, f_price, f_pv, f_idx, f_dist, f_vol, f_flow, f_seas = st.tabs(
         ["Comprehensive Grid", "Price & OI", "Price & Vol", "Indexed Performance",
-         "Return Distribution", "Rolling Volume", "OI & Volume Flow"]
+         "Return Distribution", "Rolling Volume", "OI & Volume Flow", "Seasonality"]
     )
 
     with f_grid:
@@ -796,6 +829,29 @@ with tab_flat:
                                      margin=dict(t=25, b=8, l=4, r=4), **_D)
                 st.plotly_chart(fig_sc, use_container_width=True, key=f"flow_sc_{leg}")
 
+    with f_seas:
+        st.markdown(lbl(f"{commodity} — Monthly Returns Heatmap"), unsafe_allow_html=True)
+        st.caption("Verbatim port of the Rollex dashboard's Seasonality tab. Avg/Std rows show the "
+                   "mean and spread of that month's return across all years; ICV = Avg/Std, a rough "
+                   "signal-to-noise read (higher = more consistent direction for that month).")
+        for leg in legs:
+            st.markdown(f"**{leg}**")
+            rx = load_rollex(cfg["rollex_codes"][leg]).set_index("Date").sort_index()
+            monthly_s = rx["Close"].resample("ME").last().pct_change() * 100
+            monthly_s.index = monthly_s.index.to_period("M")
+            m_df = monthly_s.reset_index()
+            m_df.columns = ["Period", "Return"]
+            m_df["Year"], m_df["Month"] = m_df["Period"].dt.year, m_df["Period"].dt.month
+            ret_pivot = m_df.pivot_table(index="Year", columns="Month", values="Return")
+            ret_pivot.columns = [MONTHS[m-1] for m in ret_pivot.columns]
+            ret_pivot = ret_pivot.reindex(columns=MONTHS).dropna(how="all")
+            abs_max = ret_pivot.abs().max().max()
+            fig_heat = _rx_simple_heatmap(ret_pivot, fmt_val=lambda v: f"{v:.1f}%",
+                                          fmt_stat=lambda l, v: f"{v:.1f}%" if l in ("Avg","Std") else f"{v:.1f}",
+                                          colorscale=RX_RET_CS, zmin=-abs_max, zmax=abs_max, zmid=0,
+                                          hover_suffix="%")
+            st.plotly_chart(fig_heat, use_container_width=True, key=f"seas_ret_{leg}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SPREAD — verified ports of the Roll Yield dashboard
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1020,7 +1076,9 @@ with tab_arb:
 # VOLATILITY — unchanged: simplified stand-in, explicitly labeled as such
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_vol:
-    v_ivrv, v_bfy = st.tabs(["IV vs RV (Simplified)", "OI Change + Volume Butterfly"])
+    v_ivrv, v_bfy, v_rvseas = st.tabs(
+        ["IV vs RV (Simplified)", "OI Change + Volume Butterfly", "RV Seasonality"]
+    )
 
     with v_ivrv:
         st.markdown(lbl(f"{commodity} — Implied vs Realized Vol (simplified)"), unsafe_allow_html=True)
@@ -1126,6 +1184,34 @@ with tab_vol:
                                               fixed_strikes=all_strikes, snap_tol=snap_tol),
                            unsafe_allow_html=True)
 
+    with v_rvseas:
+        st.markdown(lbl(f"{commodity} — Monthly Realized Volatility Heatmap"), unsafe_allow_html=True)
+        st.caption("Verbatim port of the Rollex dashboard's Seasonality tab (the RV half). Same "
+                   "rolling-vol calc used in Risk's Vol Percentile — resampled to month-end here "
+                   "to show which months tend to run hot or quiet.")
+        rv_window = st.radio("Window", ["20d", "60d", "120d"], horizontal=True, key="rvseas_window")
+        win = {"20d": 20, "60d": 60, "120d": 120}[rv_window]
+        for leg in legs:
+            st.markdown(f"**{leg}**")
+            rx = load_rollex(cfg["rollex_codes"][leg]).set_index("Date").sort_index()
+            rx["rv"] = rx["Ret"].rolling(win).std() * np.sqrt(252) * 100
+            rv_monthly = rx["rv"].resample("ME").last()
+            rv_monthly.index = rv_monthly.index.to_period("M")
+            rv_df = rv_monthly.reset_index()
+            rv_df.columns = ["Period", "RV"]
+            rv_df["Year"], rv_df["Month"] = rv_df["Period"].dt.year, rv_df["Period"].dt.month
+            rv_pivot = rv_df.pivot_table(index="Year", columns="Month", values="RV")
+            rv_pivot.columns = [MONTHS[m-1] for m in rv_pivot.columns]
+            rv_pivot = rv_pivot.reindex(columns=MONTHS).dropna(how="all")
+            if rv_pivot.empty:
+                st.info("Not enough history for this window.")
+                continue
+            rv_max, rv_min = float(rv_pivot.max().max()), float(rv_pivot.min().min())
+            fig_rv_heat = _rx_simple_heatmap(rv_pivot, fmt_val=lambda v: f"{v:.1f}",
+                                             fmt_stat=lambda l, v: f"{v:.1f}", colorscale=RX_VOL_CS,
+                                             zmin=rv_min, zmax=rv_max, zmid=None, hover_suffix="%")
+            st.plotly_chart(fig_rv_heat, use_container_width=True, key=f"rvseas_{leg}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 # RISK — verified ports of the VaR project's Parametric VaR tab
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1201,8 +1287,52 @@ with tab_risk:
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_pos:
     if commodity == "Coffee":
-        p_matrix, p_dist = st.tabs(["Z-Score Matrix", "Distribution"])
+        p_recap, p_matrix, p_dist = st.tabs(["Recap", "Z-Score Matrix", "Distribution"])
         cot = load_cot_disagg()
+
+        with p_recap:
+            st.markdown(lbl(f"{commodity} — COT Recap"), unsafe_allow_html=True)
+            st.caption("Net position, week-over-week change, and 3-year z-score for every "
+                       "category, KC and LRC side by side. Disaggregated (Futures-only), same "
+                       "basis as the Z-Score Matrix.")
+            recap_rows = []
+            for cat_name, cat_cols in DISAGG_SPEC.items():
+                row = {"Category": cat_name}
+                for leg in legs:
+                    cot_code = "RC" if leg == "LRC" else leg
+                    d = cot[(cot["Commodity"] == cot_code) & (cot["Crop"] == "All")].sort_values("Date")
+                    net_col = cat_cols["net"]
+                    if net_col not in d.columns:
+                        row[f"{leg} Net"] = row[f"{leg} 1wk Δ"] = row[f"{leg} Z (3y)"] = None
+                        continue
+                    s = pd.to_numeric(d.set_index("Date")[net_col], errors="coerce").dropna() / 1000.0
+                    if len(s) < 2:
+                        row[f"{leg} Net"] = row[f"{leg} 1wk Δ"] = row[f"{leg} Z (3y)"] = None
+                        continue
+                    row[f"{leg} Net"] = round(s.iloc[-1], 1)
+                    row[f"{leg} 1wk Δ"] = round(s.iloc[-1] - s.iloc[-2], 1)
+                    row[f"{leg} Z (3y)"] = round(_cot_zscore(s, 3), 2)
+                recap_rows.append(row)
+            recap_df = pd.DataFrame(recap_rows)
+            st.caption(f"Net and 1wk Δ in k lots · Latest COT date: {cot['Date'].max().strftime('%d %b %Y')}")
+            st.dataframe(recap_df, use_container_width=True, hide_index=True)
+
+            st.markdown("**Net Positioning — History**")
+            leg_pick_recap = st.selectbox("Leg", legs, key="recap_leg")
+            cat_pick_recap = st.selectbox("Category", list(DISAGG_SPEC.keys()), key="recap_cat")
+            cot_code_r = "RC" if leg_pick_recap == "LRC" else leg_pick_recap
+            d_r = cot[(cot["Commodity"] == cot_code_r) & (cot["Crop"] == "All")].sort_values("Date")
+            net_col_r = DISAGG_SPEC[cat_pick_recap]["net"]
+            if net_col_r in d_r.columns:
+                s_r = pd.to_numeric(d_r.set_index("Date")[net_col_r], errors="coerce").dropna() / 1000.0
+                fig_net = base_fig(height=380, yaxis_title="Net (k lots)")
+                fig_net.add_trace(go.Scatter(x=s_r.index, y=s_r.values, mode="lines",
+                                             line=dict(color=leg_colors[leg_pick_recap], width=1.8),
+                                             fill="tozeroy", fillcolor="rgba(26,86,219,0.08)"))
+                fig_net.add_hline(y=0, line_color="#cccccc", line_width=1)
+                st.plotly_chart(fig_net, use_container_width=True)
+            else:
+                st.info("No data for this leg/category.")
 
         with p_matrix:
             st.markdown(lbl("COT Z-Score Matrix — All Commodities, Disaggregated (Futures-only)"),
