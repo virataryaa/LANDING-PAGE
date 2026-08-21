@@ -54,11 +54,17 @@ st.markdown("""<style>
      Currency) — excludes any button nested inside a tab's own content
      panel, so inner sub-tabs (Vol Percentile, Forward Curves, etc.) keep
      the default look. */
+  div[data-testid="stTabs"]:not([data-testid="stTabsPanel"] div[data-testid="stTabs"]) > div[data-baseweb="tab-list"]{
+    gap:8px!important;
+  }
+  button[data-baseweb="tab"]:not([data-testid="stTabsPanel"] button[data-baseweb="tab"]){
+    padding:8px 18px!important;margin:0 2px 6px!important;border-radius:8px!important;
+  }
   button[data-baseweb="tab"]:not([data-testid="stTabsPanel"] button[data-baseweb="tab"]):nth-of-type(-n+4){
-    background:#dbeafe!important;border-radius:6px 6px 0 0!important;
+    background:#dbeafe!important;
   }
   button[data-baseweb="tab"]:not([data-testid="stTabsPanel"] button[data-baseweb="tab"]):nth-of-type(n+5){
-    background:#e5e7eb!important;border-radius:6px 6px 0 0!important;
+    background:#e5e7eb!important;
   }
 </style>""", unsafe_allow_html=True)
 
