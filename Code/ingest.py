@@ -25,9 +25,14 @@ HERE    = Path(__file__).resolve().parent.parent   # .../Landing Page
 ROOT    = HERE.parent                              # .../Interim_Migration
 OUT_DIR = HERE / "Database"
 
+ALL_ROLLEX_COMMS = ["KC", "RC", "CC", "LCC", "SB", "CT", "LSU"]
+
 SOURCES = [
-    (ROOT / "Rollex" / "Database" / "rollex_KC.parquet",        OUT_DIR / "rollex_KC.parquet"),
-    (ROOT / "Rollex" / "Database" / "rollex_RC.parquet",        OUT_DIR / "rollex_RC.parquet"),
+    # All 7 Rollex commodities — cross-commodity views (Correlation Matrix,
+    # Roll Yield Ranking, COT Z-Score Matrix) compare across the full set,
+    # not just this page's current commodity's legs.
+    *[(ROOT / "Rollex" / "Database" / f"rollex_{c}.parquet", OUT_DIR / f"rollex_{c}.parquet")
+      for c in ALL_ROLLEX_COMMS],
     (ROOT / "Futures" / "Database" / "kc_futures.parquet",      OUT_DIR / "kc_futures.parquet"),
     (ROOT / "Futures" / "Database" / "rc_futures.parquet",      OUT_DIR / "rc_futures.parquet"),
     (ROOT / "Arb" / "Database" / "front_KC.parquet",            OUT_DIR / "front_KC.parquet"),

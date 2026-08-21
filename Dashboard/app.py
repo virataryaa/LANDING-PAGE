@@ -419,6 +419,14 @@ def year_month_heatmap(df: pd.DataFrame, date_col: str, value_col: str, title: s
                          margin=dict(t=36, b=10, l=50, r=10), **_D)
     st.plotly_chart(fig_hm, use_container_width=True, key=key)
 
+# ── All Rollex commodities — for cross-commodity views (Correlation Matrix,
+#    Roll Yield Ranking, COT Z-Score Matrix) that compare across the full set
+#    rather than just the current page's commodity's legs ────────────────────
+ALL_ROLLEX_COMMS  = ["KC", "RC", "CC", "LCC", "SB", "CT", "LSU"]
+ALL_ROLLEX_NAMES  = {"KC":"KC — Arabica","RC":"RC — Robusta","CC":"CC — Cocoa (ICE)",
+                     "LCC":"LCC — Cocoa (Liffe)","SB":"SB — Sugar #11","CT":"CT — Cotton",
+                     "LSU":"LSU — White Sugar"}
+
 # ── Commodity registry — add a commodity by adding one entry here ─────────────
 COMMODITIES = {
     "Coffee": {
@@ -595,9 +603,10 @@ tab_flat, tab_spread, tab_arb, tab_vol, tab_risk, tab_pos, tab_ccy = st.tabs(
 #        + Futures dashboard's self-contained "All Contracts Rolling Volume"
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_flat:
-    f_grid, f_price, f_pv, f_idx, f_dist, f_vol, f_flow, f_seas = st.tabs(
+    f_grid, f_price, f_pv, f_idx, f_dist, f_vol, f_flow, f_seas, f_corr = st.tabs(
         ["Comprehensive Grid", "Price & OI", "Price & Vol", "Indexed Performance",
-         "Return Distribution", "Rolling Volume", "OI & Volume Flow", "Seasonality"]
+         "Return Distribution", "Rolling Volume", "OI & Volume Flow", "Seasonality",
+         "Correlation Matrix"]
     )
 
     with f_grid:
@@ -851,6 +860,45 @@ with tab_flat:
                                           colorscale=RX_RET_CS, zmin=-abs_max, zmax=abs_max, zmid=0,
                                           hover_suffix="%")
             st.plotly_chart(fig_heat, use_container_width=True, key=f"seas_ret_{leg}")
+
+    with f_corr:
+        st.markdown(lbl("Return Correlation Matrix — All Commodities"), unsafe_allow_html=True)
+        st.caption("Verbatim port of the Rollex dashboard's full correlation matrix — deliberately "
+                   "shown across all 7 Rollex commodities, not just this page's current commodity, "
+                   "since a correlation matrix is only useful cross-commodity.")
+        corr_lookback = st.slider("Lookback (calendar days)", 90, 1800, 730, step=90, key="corr_lookback")
+        ret_data = {}
+        for c in ALL_ROLLEX_COMMS:
+            try:
+                rx = load_rollex(c).set_index("Date").sort_index()
+                ret_data[c] = rx["Ret"]
+            except FileNotFoundError:
+                continue
+        ret_matrix = pd.DataFrame(ret_data).dropna()
+        if len(ret_matrix) < 10:
+            st.info("Not enough overlapping history to build a correlation matrix.")
+        else:
+            cutoff = ret_matrix.index.max() - pd.Timedelta(days=corr_lookback)
+            ret_matrix = ret_matrix[ret_matrix.index >= cutoff]
+            corr_matrix = ret_matrix.corr()
+            labels = [ALL_ROLLEX_NAMES.get(c, c).split("—")[0].strip() for c in corr_matrix.columns]
+            arr = corr_matrix.to_numpy(dtype=float, copy=True)
+            np.fill_diagonal(arr, np.nan)
+            z_mat = [[None if np.isnan(v) else v for v in row] for row in arr]
+            t_mat = [["" if v is None else f"{v:.2f}" for v in row] for row in z_mat]
+            corr_cs = [[0.0, RED], [0.45, "rgba(255,200,200,0.4)"], [0.5, "#f8f8f8"],
+                      [0.55, "rgba(200,235,200,0.4)"], [1.0, NAVY]]
+            fig_mat = go.Figure(go.Heatmap(
+                z=z_mat, x=labels, y=labels, colorscale=corr_cs, zmin=-1, zmax=1, zmid=0,
+                text=t_mat, texttemplate="%{text}", textfont=dict(size=11),
+                hovertemplate="%{y} / %{x}: <b>%{z:.3f}</b><extra></extra>",
+                showscale=True, colorbar=dict(thickness=12, len=0.8, tickfont=dict(size=9)),
+                xgap=2, ygap=2))
+            fig_mat.update_layout(height=420, margin=dict(t=10, b=8, l=4, r=4),
+                                  xaxis=dict(tickfont=dict(size=10), side="bottom", showgrid=False),
+                                  yaxis=dict(tickfont=dict(size=10), showgrid=False, autorange="reversed"),
+                                  **_D)
+            st.plotly_chart(fig_mat, use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SPREAD — verified ports of the Roll Yield dashboard
